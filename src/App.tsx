@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { FolderUp, Search, FileJson, Save, FileText, Loader2, ChevronRight, Edit3, Eye, Filter, ExternalLink, Link, Sparkles, LayoutList, Gavel, Scale, Music, Mic, Play } from 'lucide-react';
+import { FolderUp, Search, FileJson, Save, FileText, Loader2, ChevronRight, Edit3, Eye, Filter, ExternalLink, Link, Sparkles, LayoutList, Gavel, Scale, Music, Mic, Play, Key } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AnalyzedDocument, ProjectData, AudioSegment } from './types';
 import { extractTextFromPdf } from './utils/pdf';
@@ -17,6 +17,7 @@ function cn(...inputs: ClassValue[]) {
 }
 
 export default function App() {
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const [documents, setDocuments] = useState<AnalyzedDocument[]>([]);
   const [filesMap, setFilesMap] = useState<Record<string, File>>({});
   const [isProcessing, setIsProcessing] = useState(false);
@@ -40,6 +41,28 @@ export default function App() {
     witness: '', 
     phases: ['inquerito', 'instrucao', 'julgamento'] as ('inquerito' | 'instrucao' | 'julgamento')[]
   });
+
+  // Check for API Key on mount
+  React.useEffect(() => {
+    const checkKey = async () => {
+      if (window.aistudio) {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        setHasApiKey(hasKey);
+      } else {
+        // Fallback for local development if window.aistudio is not present
+        setHasApiKey(true);
+      }
+    };
+    checkKey();
+  }, []);
+
+  const handleSelectKey = async () => {
+    if (window.aistudio) {
+      await window.aistudio.openSelectKey();
+      // Assume success and proceed to the app
+      setHasApiKey(true);
+    }
+  };
 
   const handleGenerateReport = () => {
     const docsToReport = filteredDocs.filter(doc => reportPhases.includes(doc.phase || 'inquerito'));
@@ -552,6 +575,50 @@ export default function App() {
     setIsEditModalOpen(false);
     setSelectedDoc(null);
   };
+
+  if (hasApiKey === false) {
+    return (
+      <div className="fixed inset-0 z-[200] bg-stone-950 flex items-center justify-center p-6">
+        <motion.div 
+          initial={{ opacity: 0, scale: 0.9 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="max-w-md w-full bg-white border border-stone-200 rounded-3xl p-8 text-center shadow-2xl"
+        >
+          <div className="w-20 h-20 bg-stone-900 rounded-2xl flex items-center justify-center mx-auto mb-6 text-white">
+            <Sparkles size={40} />
+          </div>
+          <h2 className="text-2xl font-bold text-stone-900 mb-4">Configuração Necessária</h2>
+          <p className="text-stone-500 mb-8 leading-relaxed">
+            Para utilizar as funcionalidades de Inteligência Artificial (transcrição e análise), é necessário configurar uma chave de API do Google Gemini.
+          </p>
+          <div className="space-y-4">
+            <button 
+              onClick={handleSelectKey}
+              className="w-full py-4 bg-stone-900 hover:bg-stone-800 text-white rounded-2xl font-bold transition-all shadow-lg shadow-stone-900/20 flex items-center justify-center gap-2"
+            >
+              <Key size={20} />
+              Configurar Chave API
+            </button>
+            <p className="text-[10px] text-stone-400">
+              A chave é armazenada de forma segura no seu ambiente de projeto.
+              <br />
+              <a href="https://ai.google.dev/gemini-api/docs/billing" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                Saiba mais sobre faturação e limites.
+              </a>
+            </p>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (hasApiKey === null) {
+    return (
+      <div className="fixed inset-0 bg-stone-50 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-stone-900 animate-spin" />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col">

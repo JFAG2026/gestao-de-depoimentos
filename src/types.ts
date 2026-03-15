@@ -35,3 +35,12 @@ export interface ProjectData {
   lastUpdated: string;
   documents: AnalyzedDocument[];
 }
+
+declare global {
+  interface Window {
+    aistudio: {
+      hasSelectedApiKey: () => Promise<boolean>;
+      openSelectKey: () => Promise<void>;
+    };
+  }
+}
