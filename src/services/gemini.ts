@@ -1,8 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AudioSegment } from "../types";
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
-
 // Helper to convert audio to base64
 const fileToGenerativePart = async (file: File) => {
   return new Promise((resolve) => {
@@ -59,13 +57,14 @@ export const sanitizeTranscript = (rawText: string, offsetSeconds = 0) => {
 
 // Helper to handle retries for Gemini API calls
 const withRetry = async <T>(
-  fn: () => Promise<T>,
+  fn: (ai: GoogleGenAI) => Promise<T>,
   fileName: string,
   retryCount = 0,
   maxRetries = 8
 ): Promise<T> => {
   try {
-    return await fn();
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || process.env.GEMINI_API_KEY || "" });
+    return await fn(ai);
   } catch (error: any) {
     const errorStr = typeof error === 'string' ? error : JSON.stringify(error);
     
@@ -95,12 +94,18 @@ const withRetry = async <T>(
     }
     
     console.error(`Erro final após ${retryCount} tentativas para ${fileName}:`, error);
+    
+    // Handle invalid key error by prompting for a new one
+    if (errorStr.includes("Requested entity was not found") && typeof window !== 'undefined' && (window as any).aistudio) {
+      (window as any).aistudio.openSelectKey();
+    }
+    
     throw error;
   }
 };
 
 export const transcribeAudio = async (file: Blob | File, fileName: string, offsetSeconds = 0): Promise<{ fullText: string; segments: AudioSegment[] }> => {
-  return withRetry(async () => {
+  return withRetry(async (ai) => {
     const systemInstruction = `És um Transcritor Forense Profissional. 
     Transcreve com rigor absoluto. 
     Diarização: Identifica as vozes e usa SEMPRE o formato [MM:SS] **Interlocutor:** Texto.
@@ -136,7 +141,7 @@ export const transcribeAudio = async (file: Blob | File, fileName: string, offse
 };
 
 export const analyzeDocumentText = async (text: string, fileName: string, folderName: string): Promise<{ topics: any[] }> => {
-  return withRetry(async () => {
+  return withRetry(async (ai) => {
     const response = await ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: `Analise o seguinte texto de um documento jurídico (${fileName} na pasta ${folderName}) e extraia os principais tópicos discutidos. 

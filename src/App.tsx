@@ -1,5 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { FolderUp, Search, FileJson, Save, FileText, Loader2, ChevronRight, Edit3, Eye, Filter, ExternalLink, Link, Sparkles, LayoutList, Gavel, Scale, Music, Mic, Play, Key } from 'lucide-react';
+
 import { motion, AnimatePresence } from 'motion/react';
 import { AnalyzedDocument, ProjectData, AudioSegment } from './types';
 import { extractTextFromPdf } from './utils/pdf';
@@ -58,9 +59,16 @@ export default function App() {
 
   const handleSelectKey = async () => {
     if (window.aistudio) {
-      await window.aistudio.openSelectKey();
-      // Assume success and proceed to the app
-      setHasApiKey(true);
+      try {
+        await window.aistudio.openSelectKey();
+        setHasApiKey(true);
+        showNotify("Configuração de IA aberta. Por favor, selecione uma chave válida.", "info");
+      } catch (err) {
+        console.error("Error opening key selector:", err);
+        showNotify("Erro ao abrir o seletor de chaves.", "error");
+      }
+    } else {
+      showNotify("O seletor de chaves nativo não está disponível neste ambiente. Certifique-se de que as variáveis de ambiente estão configuradas.", "info");
     }
   };
 
@@ -85,7 +93,8 @@ export default function App() {
     date: '',
     presiding: '',
     topic: '',
-    folder: ''
+    folder: '',
+    phase: ''
   });
 
   const extractTextFromDoc = async (file: File): Promise<string> => {
@@ -522,7 +531,8 @@ export default function App() {
           booleanSearch(t.topic, filters.topic) || 
           booleanSearch(t.description, filters.topic)
         );
-      return matchesName && matchesDate && matchesPresiding && matchesTopic && matchesFolder;
+      const matchesPhase = filters.phase === '' || doc.phase === filters.phase;
+      return matchesName && matchesDate && matchesPresiding && matchesTopic && matchesFolder && matchesPhase;
     });
   }, [documents, filters]);
 
@@ -540,37 +550,45 @@ export default function App() {
   };
 
   const handleBulkAiSummarize = async () => {
-    if (!(await ensureApiKey())) return;
-
-    const docsToProcess = getDocsToProcess();
-    if (docsToProcess.length === 0) {
-      showNotify("Todos os documentos filtrados já possuem análise IA completa (incluindo páginas).", "info");
-      return;
-    }
-
     setShowBulkConfirm(false);
-    setIsAiProcessing(true);
-    setProcessingProgress({ current: 0, total: docsToProcess.length });
+    
+    try {
+      const hasKey = await ensureApiKey();
+      if (!hasKey) return;
 
-    for (let i = 0; i < docsToProcess.length; i++) {
-      const doc = docsToProcess[i];
-      setProcessingProgress({ current: i + 1, total: docsToProcess.length });
-      setCurrentlyProcessingId(doc.id);
-      try {
-        const analysis = await analyzeDocumentText(doc.rawText, doc.fileName, doc.folderName);
-        setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, topics: analysis.topics || [] } : d));
-        
-        // Add a small delay between requests to avoid hitting rate limits too fast
-        if (i < docsToProcess.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 2000));
-        }
-      } catch (error) {
-        console.error(`Erro ao processar ${doc.fileName}:`, error);
+      const docsToProcess = getDocsToProcess();
+      if (docsToProcess.length === 0) {
+        showNotify("Todos os documentos filtrados já possuem análise IA completa (incluindo páginas).", "info");
+        return;
       }
-    }
 
-    setIsAiProcessing(false);
-    setCurrentlyProcessingId(null);
+      setIsAiProcessing(true);
+      setProcessingProgress({ current: 0, total: docsToProcess.length });
+      showNotify(`A iniciar processamento de ${docsToProcess.length} documentos...`, "info");
+
+      for (let i = 0; i < docsToProcess.length; i++) {
+        const doc = docsToProcess[i];
+        setProcessingProgress({ current: i + 1, total: docsToProcess.length });
+        setCurrentlyProcessingId(doc.id);
+        try {
+          const analysis = await analyzeDocumentText(doc.rawText, doc.fileName, doc.folderName);
+          setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, topics: analysis.topics || [] } : d));
+          
+          // Add a small delay between requests to avoid hitting rate limits too fast
+          if (i < docsToProcess.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        } catch (error) {
+          console.error(`Erro ao processar ${doc.fileName}:`, error);
+        }
+      }
+    } catch (error) {
+      console.error("Erro no processamento em lote:", error);
+      showNotify("Ocorreu um erro ao iniciar o processamento em lote.", "error");
+    } finally {
+      setIsAiProcessing(false);
+      setCurrentlyProcessingId(null);
+    }
     showNotify("Processamento em lote concluído.", "success");
   };
 
@@ -582,10 +600,15 @@ export default function App() {
 
   const ensureApiKey = async () => {
     if (window.aistudio) {
-      const hasKey = await window.aistudio.hasSelectedApiKey();
-      if (!hasKey) {
-        await window.aistudio.openSelectKey();
-        return true; // Assume success per instructions
+      try {
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+          showNotify("Configuração de IA necessária. A abrir seletor...", "info");
+          await window.aistudio.openSelectKey();
+          return true; 
+        }
+      } catch (err) {
+        console.error("Error with AI Studio API:", err);
       }
     }
     return true;
@@ -616,6 +639,15 @@ export default function App() {
               placeholder="••••••••"
             />
           </div>
+
+          <button 
+            onClick={handleSelectKey}
+            className="flex items-center gap-2 px-4 py-2 text-stone-600 hover:bg-stone-50 rounded-xl transition-colors text-sm font-medium border border-stone-200"
+            title="Configurar chave de API do Gemini"
+          >
+            <Key size={18} />
+            <span>Configurar IA</span>
+          </button>
 
           <button 
             onClick={() => document.getElementById('link-pdfs')?.click()}
@@ -949,7 +981,7 @@ export default function App() {
               className="space-y-6"
             >
               {/* Filters */}
-              <div className="glass-card p-6 grid grid-cols-1 md:grid-cols-5 gap-4">
+              <div className="glass-card p-6 grid grid-cols-1 md:grid-cols-6 gap-4">
                 <div className="space-y-1.5">
                   <label className="text-[10px] font-bold uppercase tracking-wider text-stone-400">Nome</label>
                   <div className="relative">
@@ -998,6 +1030,19 @@ export default function App() {
                   </select>
                 </div>
                 <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-stone-400">Fase</label>
+                  <select 
+                    value={filters.phase}
+                    onChange={e => setFilters(prev => ({ ...prev, phase: e.target.value as any }))}
+                    className="w-full px-4 py-2 bg-stone-50 border border-stone-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-stone-900/10"
+                  >
+                    <option value="">Todas as Fases</option>
+                    <option value="inquerito">Inquérito</option>
+                    <option value="instrucao">Instrução</option>
+                    <option value="julgamento">Julgamento</option>
+                  </select>
+                </div>
+                <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="text-[10px] font-bold uppercase tracking-wider text-stone-400">Assuntos / Texto</label>
                     <span className="text-[9px] text-stone-400 cursor-help" title="Use + para obrigatório, - para excluir, OR para alternativas">Booleano (?)</span>
@@ -1027,7 +1072,7 @@ export default function App() {
                           {backupCode === '05031970' && (
                             <button 
                               onClick={() => setShowBulkConfirm(true)}
-                              disabled={isAiProcessing || filteredDocs.filter(d => d.topics.length === 0).length === 0}
+                              disabled={isAiProcessing || getDocsToProcess().length === 0}
                               className="p-1.5 bg-stone-900 text-white rounded-md hover:bg-stone-800 transition-colors disabled:opacity-50"
                               title="Analisar todos os documentos filtrados com IA"
                             >

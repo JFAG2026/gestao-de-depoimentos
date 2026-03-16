@@ -38,7 +38,7 @@ export interface ProjectData {
 
 declare global {
   interface Window {
-    aistudio: {
+    aistudio?: {
       hasSelectedApiKey: () => Promise<boolean>;
       openSelectKey: () => Promise<void>;
     };

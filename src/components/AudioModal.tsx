@@ -79,6 +79,29 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
     setAudioError(null);
   }, [audioUrl]);
 
+  // Scroll to the segment when initialSeek changes
+  useEffect(() => {
+    if (initialSeek !== null && initialSeek !== undefined && doc.audioSegments) {
+      const segments = doc.audioSegments;
+      let segmentIndex = -1;
+      
+      // Find the last segment that starts before or at initialSeek
+      for (let i = segments.length - 1; i >= 0; i--) {
+        if (segments[i].seconds <= initialSeek) {
+          segmentIndex = i;
+          break;
+        }
+      }
+
+      if (segmentIndex !== -1) {
+        // Use a slightly longer timeout to ensure the modal is fully rendered
+        setTimeout(() => {
+          segmentRefs.current[segmentIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }, 300);
+      }
+    }
+  }, [initialSeek, doc.audioSegments]);
+
   useEffect(() => {
     if (audioRef.current && initialSeek !== null && initialSeek !== undefined) {
       const audio = audioRef.current;
@@ -101,16 +124,30 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
         hasAppliedInitialSeek.current = false;
         audio.load(); // Force load if not ready
       }
-      
-      // Scroll to the segment
-      const segmentIndex = doc.audioSegments?.findIndex(s => s.seconds <= initialSeek) ?? -1;
-      if (segmentIndex !== -1) {
-        setTimeout(() => {
-          segmentRefs.current[segmentIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }, 150);
+    }
+  }, [initialSeek]);
+
+  // Auto-scroll transcript to active segment during playback
+  const lastActiveIndex = useRef<number>(-1);
+  useEffect(() => {
+    if (!isPlaying || !doc.audioSegments) return;
+    
+    const segments = doc.audioSegments;
+    let activeIndex = -1;
+    
+    // Find current active segment
+    for (let i = segments.length - 1; i >= 0; i--) {
+      if (currentTime >= segments[i].seconds) {
+        activeIndex = i;
+        break;
       }
     }
-  }, [initialSeek, doc.audioSegments]);
+    
+    if (activeIndex !== -1 && activeIndex !== lastActiveIndex.current) {
+      lastActiveIndex.current = activeIndex;
+      segmentRefs.current[activeIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [currentTime, isPlaying, doc.audioSegments]);
 
   const handleLoadedMetadata = (e: React.SyntheticEvent<HTMLAudioElement>) => {
     const audio = e.currentTarget;
@@ -369,7 +406,7 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
                   <div 
                     key={idx}
                     ref={el => segmentRefs.current[idx] = el}
-                    className={`flex gap-6 group transition-all duration-300 ${isActive ? 'opacity-100' : 'opacity-60 hover:opacity-100'}`}
+                    className={`flex gap-6 group transition-all duration-300 p-3 rounded-2xl ${isActive ? 'opacity-100 bg-blue-500/5 border-l-2 border-blue-500' : 'opacity-60 hover:opacity-100 border-l-2 border-transparent'}`}
                   >
                     <button 
                       onClick={() => {
