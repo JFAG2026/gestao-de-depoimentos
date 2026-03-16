@@ -47,10 +47,24 @@ export default function App() {
   React.useEffect(() => {
     const checkKey = async () => {
       if (window.aistudio) {
-        const hasKey = await window.aistudio.hasSelectedApiKey();
-        setHasApiKey(hasKey);
+        try {
+          const hasKey = await window.aistudio.hasSelectedApiKey();
+          setHasApiKey(hasKey);
+          if (!hasKey) {
+            // Automatically prompt if key is missing
+            await window.aistudio.openSelectKey();
+            // Re-check after prompt (though instructions say assume success, 
+            // we can at least try to update state if they closed it)
+            const updatedHasKey = await window.aistudio.hasSelectedApiKey();
+            setHasApiKey(updatedHasKey);
+          }
+        } catch (err) {
+          console.error("Error checking API key:", err);
+          setHasApiKey(false);
+        }
       } else {
-        // Fallback for local development if window.aistudio is not present
+        // Fallback for local development or standalone Vercel
+        // We assume the environment variable is set or will be handled by the backend/proxy
         setHasApiKey(true);
       }
     };
@@ -61,14 +75,17 @@ export default function App() {
     if (window.aistudio) {
       try {
         await window.aistudio.openSelectKey();
-        setHasApiKey(true);
-        showNotify("Configuração de IA aberta. Por favor, selecione uma chave válida.", "info");
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        setHasApiKey(hasKey);
+        if (hasKey) {
+          showNotify("Configuração de IA concluída com sucesso.", "success");
+        }
       } catch (err) {
         console.error("Error opening key selector:", err);
         showNotify("Erro ao abrir o seletor de chaves.", "error");
       }
     } else {
-      showNotify("O seletor de chaves nativo não está disponível neste ambiente. Certifique-se de que as variáveis de ambiente estão configuradas.", "info");
+      showNotify("O seletor de chaves nativo só está disponível dentro do ambiente AI Studio.", "info");
     }
   };
 
@@ -605,6 +622,7 @@ export default function App() {
         if (!hasKey) {
           showNotify("Configuração de IA necessária. A abrir seletor...", "info");
           await window.aistudio.openSelectKey();
+          setHasApiKey(true);
           return true; 
         }
       } catch (err) {
@@ -642,11 +660,16 @@ export default function App() {
 
           <button 
             onClick={handleSelectKey}
-            className="flex items-center gap-2 px-4 py-2 text-stone-600 hover:bg-stone-50 rounded-xl transition-colors text-sm font-medium border border-stone-200"
-            title="Configurar chave de API do Gemini"
+            className={cn(
+              "flex items-center gap-2 px-4 py-2 rounded-xl transition-colors text-sm font-medium border",
+              hasApiKey === false 
+                ? "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100 animate-pulse" 
+                : "text-stone-600 hover:bg-stone-50 border-stone-200"
+            )}
+            title={hasApiKey === false ? "Chave de API em falta! Clique para configurar." : "Configurar chave de API do Gemini"}
           >
-            <Key size={18} />
-            <span>Configurar IA</span>
+            <Key size={18} className={hasApiKey === false ? "text-amber-600" : ""} />
+            <span>{hasApiKey === false ? "Configurar IA (Obrigatório)" : "Configurar IA"}</span>
           </button>
 
           <button 
