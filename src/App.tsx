@@ -19,6 +19,8 @@ function cn(...inputs: ClassValue[]) {
 
 export default function App() {
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [customApiKey, setCustomApiKey] = useState(localStorage.getItem('GEMINI_API_KEY') || '');
   const [documents, setDocuments] = useState<AnalyzedDocument[]>([]);
   const [filesMap, setFilesMap] = useState<Record<string, File>>({});
   const [isProcessing, setIsProcessing] = useState(false);
@@ -53,8 +55,6 @@ export default function App() {
           if (!hasKey) {
             // Automatically prompt if key is missing
             await window.aistudio.openSelectKey();
-            // Re-check after prompt (though instructions say assume success, 
-            // we can at least try to update state if they closed it)
             const updatedHasKey = await window.aistudio.hasSelectedApiKey();
             setHasApiKey(updatedHasKey);
           }
@@ -63,9 +63,15 @@ export default function App() {
           setHasApiKey(false);
         }
       } else {
-        // Fallback for local development or standalone Vercel
-        // We assume the environment variable is set or will be handled by the backend/proxy
-        setHasApiKey(true);
+        // Fallback for standalone Vercel
+        const storedKey = localStorage.getItem('GEMINI_API_KEY');
+        if (storedKey) {
+          setHasApiKey(true);
+        } else {
+          setHasApiKey(false);
+          // Don't auto-show modal on mount to avoid annoyance, 
+          // but we'll show it when they try to use IA
+        }
       }
     };
     checkKey();
@@ -85,7 +91,18 @@ export default function App() {
         showNotify("Erro ao abrir o seletor de chaves.", "error");
       }
     } else {
-      showNotify("O seletor de chaves nativo só está disponível dentro do ambiente AI Studio.", "info");
+      setShowApiKeyModal(true);
+    }
+  };
+
+  const handleSaveCustomKey = () => {
+    if (customApiKey.trim()) {
+      localStorage.setItem('GEMINI_API_KEY', customApiKey.trim());
+      setHasApiKey(true);
+      setShowApiKeyModal(false);
+      showNotify("Chave de API guardada com sucesso.", "success");
+    } else {
+      showNotify("Por favor, insira uma chave de API válida.", "error");
     }
   };
 
@@ -627,6 +644,13 @@ export default function App() {
         }
       } catch (err) {
         console.error("Error with AI Studio API:", err);
+      }
+    } else {
+      const storedKey = localStorage.getItem('GEMINI_API_KEY');
+      if (!storedKey) {
+        setShowApiKeyModal(true);
+        showNotify("Por favor, configure a sua chave de API para usar funcionalidades de IA.", "info");
+        return false;
       }
     }
     return true;
@@ -1610,6 +1634,75 @@ export default function App() {
           </motion.div>
         </div>
       )}
+
+      {/* API Key Modal (for Vercel/Standalone) */}
+      <AnimatePresence>
+        {showApiKeyModal && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-stone-950/40 backdrop-blur-sm">
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white w-full max-w-md rounded-3xl shadow-2xl p-8 border border-stone-200"
+            >
+              <div className="flex items-center gap-3 mb-6">
+                <div className="w-12 h-12 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-600">
+                  <Key size={24} />
+                </div>
+                <div>
+                  <h3 className="text-xl font-semibold text-stone-900">Configurar API Gemini</h3>
+                  <p className="text-xs text-stone-500">Necessário para transcrição e análise IA</p>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-stone-400">Chave de API do Gemini</label>
+                  <div className="relative">
+                    <input 
+                      type="password" 
+                      value={customApiKey}
+                      onChange={e => setCustomApiKey(e.target.value)}
+                      placeholder="Cole aqui a sua chave AI_..."
+                      className="w-full px-4 py-3 bg-stone-50 border border-stone-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-stone-900/10 transition-all"
+                    />
+                  </div>
+                  <p className="text-[10px] text-stone-400 leading-relaxed">
+                    A sua chave é guardada localmente no navegador e nunca é enviada para os nossos servidores, exceto para comunicar diretamente com a Google Gemini API.
+                  </p>
+                </div>
+
+                <div className="pt-4 flex gap-3">
+                  <button 
+                    onClick={() => setShowApiKeyModal(false)}
+                    className="flex-1 px-6 py-3 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-xl transition-colors"
+                  >
+                    Cancelar
+                  </button>
+                  <button 
+                    onClick={handleSaveCustomKey}
+                    className="flex-1 px-6 py-3 text-sm font-medium bg-stone-900 text-white hover:bg-stone-800 rounded-xl transition-colors shadow-lg shadow-stone-900/10"
+                  >
+                    Guardar Chave
+                  </button>
+                </div>
+
+                <div className="pt-4 border-t border-stone-100">
+                  <a 
+                    href="https://aistudio.google.com/app/apikey" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 text-[10px] font-bold text-blue-600 hover:text-blue-700 transition-colors uppercase tracking-wider"
+                  >
+                    Obter chave gratuita no Google AI Studio
+                    <ExternalLink size={10} />
+                  </a>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
 
       {/* Audio Modal */}
       {isAudioModalOpen && audioModalDoc && (

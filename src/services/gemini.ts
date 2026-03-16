@@ -63,7 +63,18 @@ const withRetry = async <T>(
   maxRetries = 8
 ): Promise<T> => {
   try {
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY || process.env.GEMINI_API_KEY || "" });
+    // Priority: 1. LocalStorage (user provided), 2. window.aistudio (if available), 3. Env vars
+    let apiKey = "";
+    
+    if (typeof window !== 'undefined') {
+      apiKey = localStorage.getItem('GEMINI_API_KEY') || "";
+    }
+    
+    if (!apiKey) {
+      apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || "";
+    }
+
+    const ai = new GoogleGenAI({ apiKey });
     return await fn(ai);
   } catch (error: any) {
     const errorStr = typeof error === 'string' ? error : JSON.stringify(error);
