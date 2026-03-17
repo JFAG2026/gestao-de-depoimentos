@@ -9,6 +9,7 @@ import { extractDataLocally } from './utils/extractor';
 import { booleanSearch } from './utils/search';
 import { analyzeDocumentText, transcribeAudio } from './services/gemini';
 import { generateWordReport } from './utils/wordReport';
+import { initDatabase, saveDocumentToDb, getAllDocumentsFromDb, exportDbBinary } from './services/database';
 import AudioModal from './components/AudioModal';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -37,6 +38,8 @@ export default function App() {
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportPhases, setReportPhases] = useState<('inquerito' | 'instrucao' | 'julgamento')[]>(['inquerito', 'instrucao', 'julgamento']);
   const [isAudioModalOpen, setIsAudioModalOpen] = useState(false);
+  const [projectFolderHandle, setProjectFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [isDbLoading, setIsDbLoading] = useState(false);
   const [audioModalDoc, setAudioModalDoc] = useState<AnalyzedDocument | null>(null);
   const [audioModalSeek, setAudioModalSeek] = useState<number | null>(null);
   const [timelineFilters, setTimelineFilters] = useState({ 
@@ -242,6 +245,12 @@ export default function App() {
 
     setDocuments(prev => [...prev, ...newDocs]);
     
+    // Save to DB if initialized
+    newDocs.forEach(doc => saveDocumentToDb(doc));
+    if (projectFolderHandle) {
+      saveProjectToDisk();
+    }
+    
     // Store files for linking using multiple keys for robustness
     const newFilesMap: Record<string, File> = {};
     files.forEach(f => {
@@ -261,6 +270,61 @@ export default function App() {
     
     setIsProcessing(false);
     return newDocs.length;
+  };
+
+  const handleSelectProjectFolder = async () => {
+    try {
+      // @ts-ignore - File System Access API
+      const handle = await window.showDirectoryPicker({
+        mode: 'readwrite'
+      });
+      setProjectFolderHandle(handle);
+      setIsDbLoading(true);
+      
+      let existingData: Uint8Array | undefined;
+      try {
+        const fileHandle = await handle.getFileHandle('projeto.sqlite');
+        const file = await fileHandle.getFile();
+        const buffer = await file.arrayBuffer();
+        existingData = new Uint8Array(buffer);
+        showNotify("Base de dados do projeto carregada com sucesso.", "success");
+      } catch (e) {
+        showNotify("Nova base de dados criada na pasta selecionada.", "info");
+      }
+      
+      await initDatabase(existingData);
+      const docsFromDb = getAllDocumentsFromDb();
+      if (docsFromDb.length > 0) {
+        setDocuments(docsFromDb);
+      }
+      
+      setIsDbLoading(false);
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        console.error("Erro ao selecionar pasta do projeto:", err);
+        showNotify("Erro ao aceder à pasta do projeto.", "error");
+      }
+      setIsDbLoading(false);
+    }
+  };
+
+  const saveProjectToDisk = async () => {
+    if (!projectFolderHandle) return;
+    
+    try {
+      const binary = exportDbBinary();
+      if (!binary) return;
+      
+      const fileHandle = await projectFolderHandle.getFileHandle('projeto.sqlite', { create: true });
+      // @ts-ignore
+      const writable = await fileHandle.createWritable();
+      await writable.write(binary);
+      await writable.close();
+      showNotify("Projeto guardado no disco com sucesso.", "success");
+    } catch (err) {
+      console.error("Erro ao guardar projeto:", err);
+      showNotify("Erro ao guardar o ficheiro da base de dados.", "error");
+    }
   };
 
   const handleFolderUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -393,90 +457,106 @@ export default function App() {
   };
 
   const executeAiAnalysis = async (doc: AnalyzedDocument, onProgress?: (curr: number, total: number) => void) => {
-    let textToAnalyze = doc.rawText;
-    let audioSegments = doc.audioSegments || [];
-    const file = filesMap[doc.fileName];
+    try {
+      let textToAnalyze = doc.rawText;
+      let audioSegments = doc.audioSegments || [];
+      const file = filesMap[doc.fileName];
 
-    const isPlaceholder = !textToAnalyze || 
-                         textToAnalyze.trim() === "" || 
-                         textToAnalyze.includes("[Áudio pendente de transcrição]");
+      const isPlaceholder = !textToAnalyze || 
+                           textToAnalyze.trim() === "" || 
+                           textToAnalyze.includes("[Áudio pendente de transcrição]");
 
-    // If it's audio and needs transcription
-    if (doc.isAudio && isPlaceholder) {
-      if (!file) {
-        throw new Error(`Ficheiro áudio "${doc.fileName}" não encontrado. Por favor, use o botão 'Vincular Pastas' para localizar o arquivo original antes de analisar.`);
-      }
-
-      // Check file size. If > 15MB, we split it.
-      const CHUNK_SIZE_MB = 15;
-      const fileSizeMB = file.size / (1024 * 1024);
-      
-      if (fileSizeMB > CHUNK_SIZE_MB) {
-        // Get duration to estimate chunks
-        const duration = await new Promise<number>((resolve) => {
-          const audio = new Audio();
-          audio.src = URL.createObjectURL(file);
-          audio.onloadedmetadata = () => {
-            URL.revokeObjectURL(audio.src);
-            resolve(audio.duration);
-          };
-          audio.onerror = () => resolve(0);
-        });
-
-        const CHUNK_DURATION = 600; // 10 minutes per chunk
-        const numChunks = Math.ceil(duration / CHUNK_DURATION) || Math.ceil(fileSizeMB / CHUNK_SIZE_MB);
-        if (onProgress) onProgress(0, numChunks);
-
-        let combinedText = "";
-        let combinedSegments: AudioSegment[] = [];
-
-        for (let i = 0; i < numChunks; i++) {
-          if (onProgress) onProgress(i + 1, numChunks);
-          
-          const startByte = Math.floor((i / numChunks) * file.size);
-          const endByte = Math.floor(((i + 1) / numChunks) * file.size);
-          const chunkBlob = file.slice(startByte, endByte, file.type);
-          
-          // Estimate offset based on time
-          const offsetSeconds = i * (duration / numChunks);
-          
-          const transcription = await transcribeAudio(chunkBlob, `${file.name} (Parte ${i+1})`, offsetSeconds);
-          combinedText += (combinedText ? "\n\n" : "") + transcription.fullText;
-          combinedSegments = [...combinedSegments, ...transcription.segments];
+      // If it's audio and needs transcription
+      if (doc.isAudio && isPlaceholder) {
+        if (!file) {
+          throw new Error(`Ficheiro áudio "${doc.fileName}" não encontrado. Por favor, use o botão 'Vincular Pastas' para localizar o arquivo original antes de analisar.`);
         }
+
+        // Check file size. If > 15MB, we split it.
+        const CHUNK_SIZE_MB = 15;
+        const fileSizeMB = file.size / (1024 * 1024);
         
-        textToAnalyze = combinedText;
-        audioSegments = combinedSegments;
-      } else {
-        if (onProgress) onProgress(1, 1);
-        const transcription = await transcribeAudio(file, file.name);
-        textToAnalyze = transcription.fullText;
-        audioSegments = transcription.segments;
-      }
-    } else if (!doc.isAudio && file) {
-      // Re-extract text for non-audio if file is available to get page markers
-      const name = file.name.toLowerCase();
-      if (name.endsWith('.pdf')) {
-        textToAnalyze = await extractTextFromPdf(file);
-      } else if (name.endsWith('.docx')) {
-        textToAnalyze = await extractTextFromWord(file);
-      } else if (name.endsWith('.doc')) {
-        textToAnalyze = await extractTextFromDoc(file);
-      }
-    }
+        if (fileSizeMB > CHUNK_SIZE_MB) {
+          // Get duration to estimate chunks
+          const duration = await new Promise<number>((resolve) => {
+            const audio = new Audio();
+            audio.src = URL.createObjectURL(file);
+            audio.onloadedmetadata = () => {
+              URL.revokeObjectURL(audio.src);
+              resolve(audio.duration);
+            };
+            audio.onerror = () => resolve(0);
+          });
 
-    // FINAL SAFETY CHECK: Never analyze the placeholder text
-    if (doc.isAudio && (textToAnalyze.includes("[Áudio pendente de transcrição]") || textToAnalyze.trim() === "")) {
-      throw new Error("A transcrição falhou ou retornou um texto vazio. Não é possível gerar o resumo.");
-    }
+          const CHUNK_DURATION = 600; // 10 minutes per chunk
+          const numChunks = Math.ceil(duration / CHUNK_DURATION) || Math.ceil(fileSizeMB / CHUNK_SIZE_MB);
+          if (onProgress) onProgress(0, numChunks);
 
-    const analysis = await analyzeDocumentText(textToAnalyze, doc.fileName, doc.folderName);
-    return {
-      ...doc,
-      topics: analysis.topics || [],
-      rawText: textToAnalyze,
-      audioSegments: audioSegments
-    };
+          let combinedText = "";
+          let combinedSegments: AudioSegment[] = [];
+
+          for (let i = 0; i < numChunks; i++) {
+            if (onProgress) onProgress(i + 1, numChunks);
+            
+            const startByte = Math.floor((i / numChunks) * file.size);
+            const endByte = Math.floor(((i + 1) / numChunks) * file.size);
+            const chunkBlob = file.slice(startByte, endByte, file.type);
+            
+            // Estimate offset based on time
+            const offsetSeconds = i * (duration / numChunks);
+            
+            const transcription = await transcribeAudio(chunkBlob, `${file.name} (Parte ${i+1})`, offsetSeconds);
+            combinedText += (combinedText ? "\n\n" : "") + transcription.fullText;
+            combinedSegments = [...combinedSegments, ...transcription.segments];
+          }
+          
+          textToAnalyze = combinedText;
+          audioSegments = combinedSegments;
+        } else {
+          if (onProgress) onProgress(1, 1);
+          const transcription = await transcribeAudio(file, file.name);
+          textToAnalyze = transcription.fullText;
+          audioSegments = transcription.segments;
+        }
+      } else if (!doc.isAudio && file) {
+        // Re-extract text for non-audio if file is available to get page markers
+        const name = file.name.toLowerCase();
+        if (name.endsWith('.pdf')) {
+          textToAnalyze = await extractTextFromPdf(file);
+        } else if (name.endsWith('.docx')) {
+          textToAnalyze = await extractTextFromWord(file);
+        } else if (name.endsWith('.doc')) {
+          textToAnalyze = await extractTextFromDoc(file);
+        }
+      }
+
+      // FINAL SAFETY CHECK: Never analyze the placeholder text
+      if (doc.isAudio && (textToAnalyze.includes("[Áudio pendente de transcrição]") || textToAnalyze.trim() === "")) {
+        throw new Error("A transcrição falhou ou retornou um texto vazio. Não é possível gerar o resumo.");
+      }
+
+      const analysis = await analyzeDocumentText(textToAnalyze, doc.fileName, doc.folderName);
+      const updatedDoc = {
+        ...doc,
+        topics: analysis.topics || [],
+        rawText: textToAnalyze,
+        audioSegments: audioSegments
+      };
+
+      // Save to DB
+      saveDocumentToDb(updatedDoc);
+      if (projectFolderHandle) {
+        saveProjectToDisk();
+      }
+
+      return updatedDoc;
+    } catch (error: any) {
+      console.error("Erro interno no executeAiAnalysis:", error);
+      if (error.name === 'NotReadableError' || error.message?.includes('could not be read') || error.message?.includes('permission problems')) {
+        throw new Error(`Erro de acesso ao ficheiro "${doc.fileName}". A permissão de leitura expirou ou o ficheiro foi movido. Por favor, use o botão 'Vincular Pastas' para renovar o acesso.`);
+      }
+      throw error;
+    }
   };
 
   const handleAiSummarize = async (doc: AnalyzedDocument) => {
@@ -624,8 +704,11 @@ export default function App() {
           if (i < docsToProcess.length - 1) {
             await new Promise(resolve => setTimeout(resolve, 2000));
           }
-        } catch (error) {
+        } catch (error: any) {
           console.error(`Erro ao processar ${doc.fileName}:`, error);
+          if (error.message?.includes('Vincular Pastas')) {
+            showNotify(error.message, "error");
+          }
         }
       }
     } catch (error) {
@@ -640,11 +723,24 @@ export default function App() {
 
   const handleUpdateDoc = (updatedDoc: AnalyzedDocument) => {
     setDocuments(prev => prev.map(d => d.id === updatedDoc.id ? updatedDoc : d));
+    
+    // Save to DB
+    saveDocumentToDb(updatedDoc);
+    if (projectFolderHandle) {
+      saveProjectToDisk();
+    }
+    
     setIsEditModalOpen(false);
     setSelectedDoc(null);
   };
 
   const ensureApiKey = async () => {
+    // Se já temos a chave no ambiente (comum no AI Studio para modelos gratuitos), não pedimos nada
+    if (process.env.GEMINI_API_KEY) {
+      setHasApiKey(true);
+      return true;
+    }
+
     if (window.aistudio) {
       try {
         const hasKey = await window.aistudio.hasSelectedApiKey();
@@ -654,6 +750,8 @@ export default function App() {
           setHasApiKey(true);
           return true; 
         }
+        setHasApiKey(true);
+        return true;
       } catch (err) {
         console.error("Error with AI Studio API:", err);
       }
@@ -706,6 +804,20 @@ export default function App() {
           >
             <Key size={18} className={hasApiKey === false ? "text-amber-600" : ""} />
             <span>{hasApiKey === false ? "Configurar IA (Obrigatório)" : "Configurar IA"}</span>
+          </button>
+
+          <button 
+            onClick={handleSelectProjectFolder}
+            className={cn(
+              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border",
+              projectFolderHandle 
+                ? "bg-emerald-50 text-emerald-700 border-emerald-100" 
+                : "bg-stone-100 text-stone-600 hover:bg-stone-200 border-stone-200"
+            )}
+            title="Selecionar pasta para guardar automaticamente o projeto em SQLite"
+          >
+            <Save size={18} />
+            <span>{projectFolderHandle ? "Projeto SQLite Ativo" : "Vincular Pasta Projeto (SQLite)"}</span>
           </button>
 
           <button 
