@@ -119,6 +119,18 @@ export default function App() {
     setShowReportModal(false);
   };
 
+  // Initialize database on mount
+  React.useEffect(() => {
+    const init = async () => {
+      try {
+        await initDatabase();
+      } catch (err) {
+        console.error("Erro ao inicializar base de dados em memória:", err);
+      }
+    };
+    init();
+  }, []);
+
   const showNotify = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setNotification({ message, type });
     setTimeout(() => setNotification(null), 5000);
@@ -343,6 +355,11 @@ export default function App() {
     }
 
     await processFiles(supportedFiles);
+    
+    if (!projectFolderHandle) {
+      showNotify("Ficheiros processados. Nota: Vincule uma pasta de projeto (SQLite) para guardar automaticamente os dados no seu disco.", "info");
+    }
+    
     setActiveTab('search');
   };
 
@@ -536,6 +553,11 @@ export default function App() {
       }
 
       const analysis = await analyzeDocumentText(textToAnalyze, doc.fileName, doc.folderName);
+      
+      if (!analysis.topics || analysis.topics.length === 0) {
+        console.warn(`A IA não identificou tópicos relevantes para ${doc.fileName}.`);
+      }
+
       const updatedDoc = {
         ...doc,
         topics: analysis.topics || [],
