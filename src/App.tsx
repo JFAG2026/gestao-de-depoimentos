@@ -392,6 +392,93 @@ export default function App() {
     setIsAudioModalOpen(true);
   };
 
+  const executeAiAnalysis = async (doc: AnalyzedDocument, onProgress?: (curr: number, total: number) => void) => {
+    let textToAnalyze = doc.rawText;
+    let audioSegments = doc.audioSegments || [];
+    const file = filesMap[doc.fileName];
+
+    const isPlaceholder = !textToAnalyze || 
+                         textToAnalyze.trim() === "" || 
+                         textToAnalyze.includes("[Áudio pendente de transcrição]");
+
+    // If it's audio and needs transcription
+    if (doc.isAudio && isPlaceholder) {
+      if (!file) {
+        throw new Error(`Ficheiro áudio "${doc.fileName}" não encontrado. Por favor, use o botão 'Vincular Pastas' para localizar o arquivo original antes de analisar.`);
+      }
+
+      // Check file size. If > 15MB, we split it.
+      const CHUNK_SIZE_MB = 15;
+      const fileSizeMB = file.size / (1024 * 1024);
+      
+      if (fileSizeMB > CHUNK_SIZE_MB) {
+        // Get duration to estimate chunks
+        const duration = await new Promise<number>((resolve) => {
+          const audio = new Audio();
+          audio.src = URL.createObjectURL(file);
+          audio.onloadedmetadata = () => {
+            URL.revokeObjectURL(audio.src);
+            resolve(audio.duration);
+          };
+          audio.onerror = () => resolve(0);
+        });
+
+        const CHUNK_DURATION = 600; // 10 minutes per chunk
+        const numChunks = Math.ceil(duration / CHUNK_DURATION) || Math.ceil(fileSizeMB / CHUNK_SIZE_MB);
+        if (onProgress) onProgress(0, numChunks);
+
+        let combinedText = "";
+        let combinedSegments: AudioSegment[] = [];
+
+        for (let i = 0; i < numChunks; i++) {
+          if (onProgress) onProgress(i + 1, numChunks);
+          
+          const startByte = Math.floor((i / numChunks) * file.size);
+          const endByte = Math.floor(((i + 1) / numChunks) * file.size);
+          const chunkBlob = file.slice(startByte, endByte, file.type);
+          
+          // Estimate offset based on time
+          const offsetSeconds = i * (duration / numChunks);
+          
+          const transcription = await transcribeAudio(chunkBlob, `${file.name} (Parte ${i+1})`, offsetSeconds);
+          combinedText += (combinedText ? "\n\n" : "") + transcription.fullText;
+          combinedSegments = [...combinedSegments, ...transcription.segments];
+        }
+        
+        textToAnalyze = combinedText;
+        audioSegments = combinedSegments;
+      } else {
+        if (onProgress) onProgress(1, 1);
+        const transcription = await transcribeAudio(file, file.name);
+        textToAnalyze = transcription.fullText;
+        audioSegments = transcription.segments;
+      }
+    } else if (!doc.isAudio && file) {
+      // Re-extract text for non-audio if file is available to get page markers
+      const name = file.name.toLowerCase();
+      if (name.endsWith('.pdf')) {
+        textToAnalyze = await extractTextFromPdf(file);
+      } else if (name.endsWith('.docx')) {
+        textToAnalyze = await extractTextFromWord(file);
+      } else if (name.endsWith('.doc')) {
+        textToAnalyze = await extractTextFromDoc(file);
+      }
+    }
+
+    // FINAL SAFETY CHECK: Never analyze the placeholder text
+    if (doc.isAudio && (textToAnalyze.includes("[Áudio pendente de transcrição]") || textToAnalyze.trim() === "")) {
+      throw new Error("A transcrição falhou ou retornou um texto vazio. Não é possível gerar o resumo.");
+    }
+
+    const analysis = await analyzeDocumentText(textToAnalyze, doc.fileName, doc.folderName);
+    return {
+      ...doc,
+      topics: analysis.topics || [],
+      rawText: textToAnalyze,
+      audioSegments: audioSegments
+    };
+  };
+
   const handleAiSummarize = async (doc: AnalyzedDocument) => {
     if (!(await ensureApiKey())) return;
     
@@ -400,88 +487,8 @@ export default function App() {
     setAiProgress({ current: 0, total: 0 });
     
     try {
-      let textToAnalyze = doc.rawText;
-      let audioSegments = doc.audioSegments || [];
-
-      const file = filesMap[doc.fileName];
-
-      // If it's audio and not yet transcribed
-      if (doc.isAudio && (!doc.audioSegments || doc.audioSegments.length === 0)) {
-        if (!file) {
-          showNotify("Ficheiro áudio não encontrado para transcrição. Vincule o ficheiro primeiro.", "error");
-          setIsAiProcessing(false);
-          setCurrentlyProcessingId(null);
-          return;
-        }
-
-        // Check file size. If > 15MB, we split it.
-        // Also split if it's likely long (we'll check duration)
-        const CHUNK_SIZE_MB = 15;
-        const fileSizeMB = file.size / (1024 * 1024);
-        
-        if (fileSizeMB > CHUNK_SIZE_MB) {
-          showNotify("Ficheiro grande detetado. A dividir em partes para transcrição segura...", "info");
-          
-          // Get duration to estimate chunks
-          const duration = await new Promise<number>((resolve) => {
-            const audio = new Audio();
-            audio.src = URL.createObjectURL(file);
-            audio.onloadedmetadata = () => {
-              URL.revokeObjectURL(audio.src);
-              resolve(audio.duration);
-            };
-            audio.onerror = () => resolve(0);
-          });
-
-          const CHUNK_DURATION = 600; // 10 minutes per chunk
-          const numChunks = Math.ceil(duration / CHUNK_DURATION) || Math.ceil(fileSizeMB / CHUNK_SIZE_MB);
-          setAiProgress({ current: 0, total: numChunks });
-
-          let combinedText = "";
-          let combinedSegments: AudioSegment[] = [];
-
-          for (let i = 0; i < numChunks; i++) {
-            setAiProgress(prev => ({ ...prev, current: i + 1 }));
-            
-            const startByte = Math.floor((i / numChunks) * file.size);
-            const endByte = Math.floor(((i + 1) / numChunks) * file.size);
-            const chunkBlob = file.slice(startByte, endByte, file.type);
-            
-            // Estimate offset based on time
-            const offsetSeconds = i * (duration / numChunks);
-            
-            const transcription = await transcribeAudio(chunkBlob, `${file.name} (Parte ${i+1})`, offsetSeconds);
-            combinedText += (combinedText ? "\n\n" : "") + transcription.fullText;
-            combinedSegments = [...combinedSegments, ...transcription.segments];
-          }
-          
-          textToAnalyze = combinedText;
-          audioSegments = combinedSegments;
-        } else {
-          setAiProgress({ current: 1, total: 1 });
-          const transcription = await transcribeAudio(file, file.name);
-          textToAnalyze = transcription.fullText;
-          audioSegments = transcription.segments;
-        }
-      } else if (!doc.isAudio && file) {
-        // Re-extract text for non-audio if file is available to get page markers
-        const name = file.name.toLowerCase();
-        if (name.endsWith('.pdf')) {
-          textToAnalyze = await extractTextFromPdf(file);
-        } else if (name.endsWith('.docx')) {
-          textToAnalyze = await extractTextFromWord(file);
-        } else if (name.endsWith('.doc')) {
-          textToAnalyze = await extractTextFromDoc(file);
-        }
-      }
-
-      const analysis = await analyzeDocumentText(textToAnalyze, doc.fileName, doc.folderName);
-      const updatedDoc = {
-        ...doc,
-        topics: analysis.topics || [],
-        rawText: textToAnalyze,
-        audioSegments: audioSegments
-      };
+      const updatedDoc = await executeAiAnalysis(doc, (curr, total) => setAiProgress({ current: curr, total }));
+      
       setDocuments(prev => prev.map(d => d.id === doc.id ? updatedDoc : d));
       if (selectedDoc?.id === doc.id) {
         setSelectedDoc(updatedDoc);
@@ -493,7 +500,7 @@ export default function App() {
       if (errorStr.includes("RESOURCE_EXHAUSTED") || errorStr.includes("429")) {
         showNotify("Limite de quota atingido. Por favor, aguarde alguns minutos antes de tentar novamente.", "error");
       } else {
-        showNotify("Erro ao processar com IA. Verifique a sua ligação ou chave API.", "error");
+        showNotify(error.message || "Erro ao processar com IA. Verifique a sua ligação ou chave API.", "error");
       }
     } finally {
       setIsAiProcessing(false);
@@ -575,7 +582,10 @@ export default function App() {
       // Caso 1: Sem tópicos
       if (d.topics.length === 0) return true;
       
-      // Caso 2: É documento (não áudio) mas não tem números de página em nenhum tópico
+      // Caso 2: Áudio com tópicos mas sem transcrição (provavelmente erro do bulk anterior ou placeholder)
+      if (d.isAudio && (!d.audioSegments || d.audioSegments.length === 0 || d.rawText === "[Áudio pendente de transcrição]")) return true;
+
+      // Caso 3: É documento (não áudio) mas não tem números de página em nenhum tópico
       // Isto sugere que foi analisado antes da funcionalidade de páginas ser adicionada
       if (!d.isAudio && d.topics.every(t => !t.pages || t.pages.length === 0)) return true;
       
@@ -604,9 +614,11 @@ export default function App() {
         const doc = docsToProcess[i];
         setProcessingProgress({ current: i + 1, total: docsToProcess.length });
         setCurrentlyProcessingId(doc.id);
+        setAiProgress({ current: 0, total: 0 });
+        
         try {
-          const analysis = await analyzeDocumentText(doc.rawText, doc.fileName, doc.folderName);
-          setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, topics: analysis.topics || [] } : d));
+          const updatedDoc = await executeAiAnalysis(doc, (curr, total) => setAiProgress({ current: curr, total }));
+          setDocuments(prev => prev.map(d => d.id === doc.id ? updatedDoc : d));
           
           // Add a small delay between requests to avoid hitting rate limits too fast
           if (i < docsToProcess.length - 1) {
