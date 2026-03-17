@@ -114,7 +114,15 @@ const withRetry = async <T>(
     }
     
     // Handle invalid key error by prompting for a new one
-    if (errorStr.includes("Requested entity was not found") && typeof window !== 'undefined' && (window as any).aistudio) {
+    const isAuthError = 
+      errorStr.includes("API key not valid") || 
+      errorStr.includes("INVALID_ARGUMENT") ||
+      errorStr.includes("401") ||
+      errorStr.includes("403") ||
+      errorStr.includes("Requested entity was not found");
+
+    if (isAuthError && typeof window !== 'undefined' && (window as any).aistudio) {
+      console.warn("Chave API inválida ou não encontrada. A abrir seletor...");
       (window as any).aistudio.openSelectKey();
     }
     
@@ -158,24 +166,57 @@ export const transcribeAudio = async (file: Blob | File, fileName: string, offse
   }, fileName);
 };
 
-export const analyzeDocumentText = async (text: string, fileName: string, folderName: string): Promise<{ topics: any[] }> => {
+export const analyzeDocumentText = async (text: string, fileName: string, folderName: string, file?: File): Promise<{ topics: any[] }> => {
   return withRetry(async (ai) => {
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview",
-      contents: `Analise o seguinte texto de um documento jurídico (${fileName} na pasta ${folderName}) e extraia os principais tópicos discutidos. 
+    const isPdf = fileName.toLowerCase().endsWith('.pdf');
+    const cleanedText = text.replace(/\[PÁGINA \d+\]/g, '').trim();
+    const isTextInsufficient = cleanedText.length < 100;
+    
+    let contents: any;
+    
+    if (isPdf && isTextInsufficient && file) {
+      console.log(`Texto extraído insuficiente para ${fileName}. A enviar PDF diretamente para a IA...`);
+      const base64Data = await new Promise<string>((resolve) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+        reader.readAsDataURL(file);
+      });
+      
+      contents = {
+        parts: [
+          { inlineData: { data: base64Data, mimeType: "application/pdf" } },
+          { text: `És um Especialista em Análise de Processos Judiciais. 
+          Analise o PDF anexo (${fileName} na pasta ${folderName}) e extraia os principais tópicos, questões e factos discutidos.
+          
+          INSTRUÇÕES CRÍTICAS PARA OS TÓPICOS:
+          1. Identifica os temas centrais do interrogatório/inquirição. 
+          2. Para cada tema, cria um título (campo 'topic') que seja OBRIGATORIAMENTE claro, contextual e autoexplicativo (ex: "Contradição sobre a entrega de 50.000€ no Porto" em vez de "Contradição").
+          3. No campo 'description', resume o que foi perguntado e o que foi respondido sobre esse tema.
+          4. No campo 'quote', extrai uma citação literal (ipsis verbis) que seja a prova mais relevante desse tópico.
+          5. Se identificares carimbos de tempo [MM:SS] ou números de página, coloca-os nos campos 'timestamps' e 'pages' respetivamente.
+          6. Se o documento for um interrogatório, foca-te nas perguntas incisivas e nas respostas que confirmam ou negam factos da acusação.` }
+        ]
+      };
+    } else {
+      contents = `És um Especialista em Análise de Processos Judiciais. 
+      Analise o seguinte texto de um documento jurídico (${fileName} na pasta ${folderName}) e extraia os principais tópicos, questões e factos discutidos.
       
       INSTRUÇÕES CRÍTICAS PARA OS TÓPICOS:
-      1. O título do tópico (campo 'topic') deve ser OBRIGATORIAMENTE claro, contextual e autoexplicativo. 
-      2. NUNCA use títulos genéricos como "Entregas de Numerário" ou "Contas Bancárias". 
-      3. Use o formato "Contexto/Objeto: Ação/Facto". 
-      4. Se o texto contiver carimbos de tempo no formato [MM:SS], identifique os carimbos exatos onde este assunto é discutido e coloque-os no campo 'timestamps'.
-      5. Se o texto contiver marcadores de página no formato [PÁGINA X], identifique em que página ou páginas este assunto é abordado e coloque os números das páginas no campo 'pages' (apenas os números).
-      6. Foque no "coração" do interrogatório/inquirição. Ignore ou minimize detalhes puramente biográficos ou de identificação, a menos que sejam cruciais para o contexto dos factos.
-      7. A descrição deve ser um resumo conciso mas completo do que foi dito sobre esse assunto.
-      8. O campo 'quote' deve conter uma citação curta e literal (ipsis verbis) do texto original que fundamente este tópico.
+      1. Identifica os temas centrais do interrogatório/inquirição. 
+      2. Para cada tema, cria um título (campo 'topic') que seja OBRIGATORIAMENTE claro, contextual e autoexplicativo (ex: "Contradição sobre a entrega de 50.000€ no Porto" em vez de "Contradição").
+      3. No campo 'description', resume o que foi perguntado e o que foi respondido sobre esse tema.
+      4. No campo 'quote', extrai uma citação literal (ipsis verbis) que seja a prova mais relevante desse tópico.
+      5. Se o texto contiver carimbos de tempo [MM:SS], extrai-os para o campo 'timestamps'.
+      6. Se o texto contiver [PÁGINA X], extrai o número para o campo 'pages'.
+      7. Se o documento for um interrogatório, foca-te nas perguntas incisivas e nas respostas que confirmam ou negam factos da acusação.
 
       Texto:
-      ${text.substring(0, 30000)}`, // Limit text size for safety
+      ${text.substring(0, 35000)}`;
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents,
       config: {
         responseMimeType: "application/json",
         responseSchema: {

@@ -28,6 +28,7 @@ export interface AnalyzedDocument {
   audioSegments?: AudioSegment[];
   isAudio?: boolean;
   speakerAliases?: Record<string, string>;
+  createdAt?: string;
 }
 
 export interface ProjectData {

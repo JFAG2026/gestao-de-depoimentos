@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { AnalyzedDocument, ProjectData, AudioSegment } from './types';
 import { extractTextFromPdf } from './utils/pdf';
 import { extractTextFromWord } from './utils/word';
+import { extractTextFromDoc } from './utils/doc';
 import { extractDataLocally } from './utils/extractor';
 import { booleanSearch } from './utils/search';
 import { analyzeDocumentText, transcribeAudio } from './services/gemini';
@@ -179,79 +180,88 @@ export default function App() {
     const currentPhase = activeTab === 'instrucao' ? 'instrucao' : 
                          activeTab === 'julgamento' ? 'julgamento' : 'inquerito';
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      setProcessingProgress({ current: i + 1, total: files.length });
-
-      try {
-        let text = '';
-        const name = file.name.toLowerCase();
-        const isAudio = name.endsWith('.mp3') || name.endsWith('.wav') || name.endsWith('.m4a') || name.endsWith('.aac') || name.endsWith('.ogg');
+    // Process in batches of 2 to avoid browser freezing and memory pressure
+    const BATCH_SIZE = 2;
+    for (let i = 0; i < files.length; i += BATCH_SIZE) {
+      const batch = files.slice(i, i + BATCH_SIZE);
+      
+      const batchResults = await Promise.all(batch.map(async (file, index) => {
+        const currentIndex = i + index + 1;
         
-        if (name.endsWith('.pdf')) {
-          text = await extractTextFromPdf(file);
-        } else if (name.endsWith('.docx')) {
-          text = await extractTextFromWord(file);
-        } else if (name.endsWith('.doc')) {
-          text = await extractTextFromDoc(file);
-        } else if (isAudio) {
-          text = "[Áudio pendente de transcrição]";
-        }
-
-        const fullPath = file.webkitRelativePath || file.name;
-        const pathParts = fullPath.split('/');
-        
-        // Parent folder (top-level uploaded folder)
-        const parentFolder = pathParts.length > 1 ? pathParts[0] : 'Raiz';
-        
-        // Full folder path (excluding filename)
-        const folderName = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : 'Raiz';
-        
-        const analysis = isAudio ? { personName: file.name.split('.')[0], date: '', presidingEntity: 'Desconhecido', topics: [] } : extractDataLocally(text, file.name);
-        
-        // Person name from subfolder (if audio and in a subfolder)
-        let personName = analysis.personName || 'Desconhecido';
-        if (isAudio && pathParts.length > 2) {
-          const immediateFolder = pathParts[pathParts.length - 2];
-          if (immediateFolder !== parentFolder) {
-            personName = immediateFolder;
+        try {
+          let text = '';
+          const name = file.name.toLowerCase();
+          const isAudio = name.endsWith('.mp3') || name.endsWith('.wav') || name.endsWith('.m4a') || name.endsWith('.aac') || name.endsWith('.ogg');
+          
+          if (name.endsWith('.pdf')) {
+            text = await extractTextFromPdf(file);
+          } else if (name.endsWith('.docx')) {
+            text = await extractTextFromWord(file);
+          } else if (name.endsWith('.doc')) {
+            text = await extractTextFromDoc(file);
+          } else if (isAudio) {
+            text = "[Áudio pendente de transcrição]";
           }
-        }
 
-        // Date parsing from filename (e.g. 1.20260128...)
-        let extractedDate = analysis.date || 'Desconhecida';
-        if (isAudio) {
-          const parts = file.name.split('.');
-          const nameAfterDot = parts.length > 1 ? parts[1] : parts[0];
-          // Look for YYYYMMDD at the start of the part after the dot
-          const dateMatch = nameAfterDot.match(/^(\d{4})(\d{2})(\d{2})/);
-          if (dateMatch) {
-            extractedDate = `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]}`;
+          const fullPath = file.webkitRelativePath || file.name;
+          const pathParts = fullPath.split('/');
+          const parentFolder = pathParts.length > 1 ? pathParts[0] : 'Raiz';
+          const folderName = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : 'Raiz';
+          
+          const analysis = isAudio ? { personName: file.name.split('.')[0], date: '', presidingEntity: 'Desconhecido', topics: [] } : extractDataLocally(text, file.name);
+          
+          let personName = analysis.personName || 'Desconhecido';
+          if (isAudio && pathParts.length > 2) {
+            const immediateFolder = pathParts[pathParts.length - 2];
+            if (immediateFolder !== parentFolder) {
+              personName = immediateFolder;
+            }
           }
-        }
 
-        newDocs.push({
-          id: crypto.randomUUID(),
-          fileName: file.name,
-          folderName: folderName,
-          parentFolder: parentFolder,
-          personName: personName,
-          date: extractedDate,
-          presidingEntity: (analysis.presidingEntity as any) || 'Desconhecido',
-          topics: analysis.topics || [],
-          rawText: text,
-          fileType: isAudio ? 'áudio' : (folderName.toLowerCase().includes('inquirição') ? 'inquirição' : 
-                    folderName.toLowerCase().includes('interrogatório') ? 'interrogatório' : 
-                    folderName.toLowerCase().includes('transcrição') ? 'transcrição' : 'resumo'),
-          phase: currentPhase,
-          isAudio: isAudio
-        });
+          let extractedDate = analysis.date || 'Desconhecida';
+          if (isAudio) {
+            const parts = file.name.split('.');
+            const nameAfterDot = parts.length > 1 ? parts[1] : parts[0];
+            const dateMatch = nameAfterDot.match(/^(\d{4})(\d{2})(\d{2})/);
+            if (dateMatch) {
+              extractedDate = `${dateMatch[3]}/${dateMatch[2]}/${dateMatch[1]}`;
+            }
+          }
 
-        if (i < files.length - 1) {
-          await new Promise(resolve => setTimeout(resolve, 50));
+          const doc: AnalyzedDocument = {
+            id: crypto.randomUUID(),
+            fileName: file.name,
+            folderName: folderName,
+            parentFolder: parentFolder,
+            personName: personName,
+            date: extractedDate,
+            presidingEntity: (analysis.presidingEntity as any) || 'Desconhecido',
+            topics: analysis.topics || [],
+            rawText: text,
+            fileType: isAudio ? 'áudio' : (folderName.toLowerCase().includes('inquirição') ? 'inquirição' : 
+                      folderName.toLowerCase().includes('interrogatório') ? 'interrogatório' : 
+                      folderName.toLowerCase().includes('transcrição') ? 'transcrição' : 'resumo'),
+            phase: currentPhase,
+            isAudio: isAudio,
+            createdAt: new Date().toISOString()
+          };
+          
+          return doc;
+        } catch (error) {
+          console.error(`Erro ao processar ${file.name}:`, error);
+          return null;
+        } finally {
+          setProcessingProgress(prev => ({ ...prev, current: Math.min(prev.total, prev.current + 1) }));
         }
-      } catch (error) {
-        console.error(`Erro ao processar ${file.name}:`, error);
+      }));
+
+      batchResults.forEach(doc => {
+        if (doc) newDocs.push(doc);
+      });
+
+      // Let the browser breathe between batches
+      if (i + BATCH_SIZE < files.length) {
+        await new Promise(resolve => setTimeout(resolve, 300));
       }
     }
 
@@ -336,7 +346,9 @@ export default function App() {
       
       setIsDbLoading(false);
     } catch (err: any) {
-      if (err.name !== 'AbortError') {
+      if (err.name === 'SecurityError' || err.message.includes('Cross origin sub frames')) {
+        showNotify("Para vincular pastas locais, abra a aplicação num novo separador (ícone no canto superior direito).", "error");
+      } else if (err.name !== 'AbortError') {
         console.error("Erro ao selecionar pasta do projeto:", err);
         showNotify("Erro ao aceder à pasta do projeto: " + err.message, "error");
       }
@@ -344,12 +356,23 @@ export default function App() {
     }
   };
 
+  const [isSaving, setIsSaving] = useState(false);
+  const isInIframe = window.self !== window.top;
+
+  const handleOpenInNewTab = () => {
+    window.open(window.location.href, '_blank');
+  };
+
   const saveProjectToDisk = async (manual = false) => {
-    if (!projectFolderHandle) return;
+    if (!projectFolderHandle || isSaving) return;
     
+    setIsSaving(true);
     try {
       const binary = exportDbBinary();
-      if (!binary) return;
+      if (!binary) {
+        setIsSaving(false);
+        return;
+      }
       
       const fileHandle = await projectFolderHandle.getFileHandle('projeto.sqlite', { create: true });
       // @ts-ignore
@@ -365,6 +388,8 @@ export default function App() {
       if (manual) {
         showNotify("Erro ao guardar o ficheiro: " + err.message, "error");
       }
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -581,7 +606,7 @@ export default function App() {
         throw new Error("A transcrição falhou ou retornou um texto vazio. Não é possível gerar o resumo.");
       }
 
-      const analysis = await analyzeDocumentText(textToAnalyze, doc.fileName, doc.folderName);
+      const analysis = await analyzeDocumentText(textToAnalyze, doc.fileName, doc.folderName, file || undefined);
       
       if (!analysis.topics || analysis.topics.length === 0) {
         console.warn(`A IA não identificou tópicos relevantes para ${doc.fileName}.`);
@@ -766,7 +791,7 @@ export default function App() {
           
           // Add a small delay between requests to avoid hitting rate limits too fast
           if (i < docsToProcess.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await new Promise(resolve => setTimeout(resolve, 3000));
           }
         } catch (error: any) {
           console.error(`Erro ao processar ${doc.fileName}:`, error);
@@ -774,6 +799,11 @@ export default function App() {
             showNotify(error.message, "error");
           }
         }
+      }
+      
+      // Final save to ensure everything is on disk after bulk processing
+      if (projectFolderHandle) {
+        await saveProjectToDisk();
       }
     } catch (error) {
       console.error("Erro no processamento em lote:", error);
@@ -799,39 +829,33 @@ export default function App() {
   };
 
   const ensureApiKey = async () => {
-    console.log("Verificando chave API...", { 
-      env_api_key: !!process.env.API_KEY, 
-      env_gemini_key: !!process.env.GEMINI_API_KEY,
-      has_aistudio: !!window.aistudio 
-    });
-    
-    // Se já temos a chave no ambiente (comum no AI Studio para modelos gratuitos), não pedimos nada
-    if (process.env.API_KEY || process.env.GEMINI_API_KEY) {
-      setHasApiKey(true);
-      return true;
-    }
-
     if (window.aistudio) {
       try {
         const hasKey = await window.aistudio.hasSelectedApiKey();
         if (!hasKey) {
           showNotify("Configuração de IA necessária. A abrir seletor...", "info");
           await window.aistudio.openSelectKey();
-          setHasApiKey(true);
-          return true; 
+          const nowHasKey = await window.aistudio.hasSelectedApiKey();
+          setHasApiKey(nowHasKey);
+          return nowHasKey; 
         }
         setHasApiKey(true);
         return true;
       } catch (err) {
         console.error("Error with AI Studio API:", err);
       }
-    } else {
-      const storedKey = localStorage.getItem('GEMINI_API_KEY');
-      if (!storedKey) {
-        setShowApiKeyModal(true);
-        showNotify("Por favor, configure a sua chave de API para usar funcionalidades de IA.", "info");
-        return false;
-      }
+    }
+    
+    if (process.env.API_KEY || process.env.GEMINI_API_KEY) {
+      setHasApiKey(true);
+      return true;
+    }
+    
+    const storedKey = localStorage.getItem('GEMINI_API_KEY');
+    if (!storedKey) {
+      setShowApiKeyModal(true);
+      showNotify("Por favor, configure a sua chave de API para usar funcionalidades de IA.", "info");
+      return false;
     }
     return true;
   };
@@ -876,19 +900,32 @@ export default function App() {
             <span>{hasApiKey === false ? "Configurar IA (Obrigatório)" : "Configurar IA"}</span>
           </button>
 
-          <button 
-            onClick={handleSelectProjectFolder}
-            className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border",
-              projectFolderHandle 
-                ? "bg-emerald-50 text-emerald-700 border-emerald-100" 
-                : "bg-stone-100 text-stone-600 hover:bg-stone-200 border-stone-200"
-            )}
-            title="Selecionar pasta para guardar automaticamente o projeto em SQLite"
-          >
-            <Save size={18} />
-            <span>{projectFolderHandle ? "Projeto SQLite Ativo" : "Vincular Pasta Projeto (SQLite)"}</span>
-          </button>
+          {isInIframe && !projectFolderHandle && (
+            <button 
+              onClick={handleOpenInNewTab}
+              className="flex items-center gap-2 px-4 py-2 bg-amber-500 text-white hover:bg-amber-600 rounded-xl transition-all text-sm font-medium shadow-sm animate-bounce"
+              title="Necessário abrir em novo separador para permitir acesso ao disco local"
+            >
+              <ExternalLink size={18} />
+              <span>Abrir em Novo Separador (Ativar SQLite)</span>
+            </button>
+          )}
+
+          {!isInIframe && (
+            <button 
+              onClick={handleSelectProjectFolder}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border",
+                projectFolderHandle 
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-100" 
+                  : "bg-stone-100 text-stone-600 hover:bg-stone-200 border-stone-200"
+              )}
+              title="Selecionar pasta para guardar automaticamente o projeto em SQLite"
+            >
+              <Save size={18} />
+              <span>{projectFolderHandle ? "Projeto SQLite Ativo" : "Vincular Pasta Projeto (SQLite)"}</span>
+            </button>
+          )}
 
           {projectFolderHandle && (
             <button 

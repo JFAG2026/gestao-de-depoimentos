@@ -49,19 +49,19 @@ export const saveDocumentToDb = (doc: any) => {
   `);
   
   stmt.run([
-    doc.id,
-    doc.fileName,
-    doc.folderName,
-    doc.fileType,
-    doc.rawText,
+    doc.id || crypto.randomUUID(),
+    doc.fileName || 'Sem nome',
+    doc.folderName || 'Raiz',
+    doc.fileType || 'resumo',
+    doc.rawText || '',
     doc.isAudio ? 1 : 0,
     JSON.stringify(doc.topics || []),
     JSON.stringify(doc.audioSegments || []),
-    doc.personName || null,
-    doc.date || null,
-    doc.presidingEntity || null,
-    doc.phase || '',
-    doc.createdAt
+    doc.personName || 'Desconhecido',
+    doc.date || 'Desconhecida',
+    doc.presidingEntity || 'Desconhecido',
+    doc.phase || 'inquerito',
+    doc.createdAt || new Date().toISOString()
   ]);
   stmt.free();
 };
