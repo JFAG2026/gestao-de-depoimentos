@@ -106,6 +106,13 @@ const withRetry = async <T>(
     
     console.error(`Erro final após ${retryCount} tentativas para ${fileName}:`, error);
     
+    // Enhance error message if it's an API error
+    if (error.message && (error.message.includes("API key not valid") || error.message.includes("401") || error.message.includes("403"))) {
+      error.message = `Erro de Autenticação: ${error.message}. Verifique a sua chave API.`;
+    } else if (error.message && (error.message.includes("RESOURCE_EXHAUSTED") || error.message.includes("429"))) {
+      error.message = "Limite de quota atingido (429). Por favor, aguarde.";
+    }
+    
     // Handle invalid key error by prompting for a new one
     if (errorStr.includes("Requested entity was not found") && typeof window !== 'undefined' && (window as any).aistudio) {
       (window as any).aistudio.openSelectKey();

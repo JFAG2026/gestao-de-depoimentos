@@ -301,10 +301,34 @@ export default function App() {
         existingData = new Uint8Array(buffer);
         showNotify("Base de dados do projeto carregada com sucesso.", "success");
       } catch (e) {
-        showNotify("Nova base de dados criada na pasta selecionada.", "info");
+        console.log("Ficheiro projeto.sqlite não encontrado, será criado um novo.");
       }
       
       await initDatabase(existingData);
+      
+      // Se já temos documentos em memória, vamos guardá-los no novo DB
+      if (documents.length > 0) {
+        documents.forEach(doc => saveDocumentToDb(doc));
+      }
+      
+      // Forçar a criação/atualização do ficheiro no disco para confirmar a ligação imediatamente
+      const binary = exportDbBinary();
+      if (binary) {
+        try {
+          const fileHandle = await handle.getFileHandle('projeto.sqlite', { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(binary);
+          await writable.close();
+          console.log("Ficheiro projeto.sqlite guardado com sucesso.");
+          if (!existingData) {
+            showNotify("Ficheiro projeto.sqlite criado com sucesso na pasta selecionada.", "success");
+          }
+        } catch (writeErr: any) {
+          console.error("Erro ao escrever ficheiro no disco:", writeErr);
+          showNotify("Erro ao criar ficheiro na pasta: " + writeErr.message, "error");
+        }
+      }
+      
       const docsFromDb = getAllDocumentsFromDb();
       if (docsFromDb.length > 0) {
         setDocuments(docsFromDb);
@@ -314,13 +338,13 @@ export default function App() {
     } catch (err: any) {
       if (err.name !== 'AbortError') {
         console.error("Erro ao selecionar pasta do projeto:", err);
-        showNotify("Erro ao aceder à pasta do projeto.", "error");
+        showNotify("Erro ao aceder à pasta do projeto: " + err.message, "error");
       }
       setIsDbLoading(false);
     }
   };
 
-  const saveProjectToDisk = async () => {
+  const saveProjectToDisk = async (manual = false) => {
     if (!projectFolderHandle) return;
     
     try {
@@ -332,10 +356,15 @@ export default function App() {
       const writable = await fileHandle.createWritable();
       await writable.write(binary);
       await writable.close();
-      showNotify("Projeto guardado no disco com sucesso.", "success");
-    } catch (err) {
+      if (manual) {
+        showNotify("Projeto guardado no disco com sucesso.", "success");
+      }
+      console.log("Base de dados SQLite sincronizada com o disco.");
+    } catch (err: any) {
       console.error("Erro ao guardar projeto:", err);
-      showNotify("Erro ao guardar o ficheiro da base de dados.", "error");
+      if (manual) {
+        showNotify("Erro ao guardar o ficheiro: " + err.message, "error");
+      }
     }
   };
 
@@ -598,12 +627,19 @@ export default function App() {
       showNotify("Análise IA concluída com sucesso.", "success");
     } catch (error: any) {
       console.error("Erro na análise IA:", error);
-      const errorStr = JSON.stringify(error);
-      if (errorStr.includes("RESOURCE_EXHAUSTED") || errorStr.includes("429")) {
-        showNotify("Limite de quota atingido. Por favor, aguarde alguns minutos antes de tentar novamente.", "error");
-      } else {
-        showNotify(error.message || "Erro ao processar com IA. Verifique a sua ligação ou chave API.", "error");
+      
+      let errorMessage = error.message || "Erro ao processar com IA.";
+      
+      // Check for specific error types
+      if (errorMessage.includes("RESOURCE_EXHAUSTED") || errorMessage.includes("429")) {
+        errorMessage = "Limite de quota atingido. Por favor, aguarde alguns minutos antes de tentar novamente.";
+      } else if (errorMessage.includes("API key not valid") || errorMessage.includes("invalid api key")) {
+        errorMessage = "Chave API inválida. Por favor, configure uma chave válida.";
+      } else if (errorMessage.includes("Requested entity was not found")) {
+        errorMessage = "Modelo não encontrado ou acesso negado. Verifique a sua chave API.";
       }
+      
+      showNotify(errorMessage, "error");
     } finally {
       setIsAiProcessing(false);
       setCurrentlyProcessingId(null);
@@ -722,6 +758,12 @@ export default function App() {
           const updatedDoc = await executeAiAnalysis(doc, (curr, total) => setAiProgress({ current: curr, total }));
           setDocuments(prev => prev.map(d => d.id === doc.id ? updatedDoc : d));
           
+          // Save each document as it's processed
+          saveDocumentToDb(updatedDoc);
+          if (projectFolderHandle) {
+            saveProjectToDisk();
+          }
+          
           // Add a small delay between requests to avoid hitting rate limits too fast
           if (i < docsToProcess.length - 1) {
             await new Promise(resolve => setTimeout(resolve, 2000));
@@ -757,8 +799,14 @@ export default function App() {
   };
 
   const ensureApiKey = async () => {
+    console.log("Verificando chave API...", { 
+      env_api_key: !!process.env.API_KEY, 
+      env_gemini_key: !!process.env.GEMINI_API_KEY,
+      has_aistudio: !!window.aistudio 
+    });
+    
     // Se já temos a chave no ambiente (comum no AI Studio para modelos gratuitos), não pedimos nada
-    if (process.env.GEMINI_API_KEY) {
+    if (process.env.API_KEY || process.env.GEMINI_API_KEY) {
       setHasApiKey(true);
       return true;
     }
@@ -841,6 +889,17 @@ export default function App() {
             <Save size={18} />
             <span>{projectFolderHandle ? "Projeto SQLite Ativo" : "Vincular Pasta Projeto (SQLite)"}</span>
           </button>
+
+          {projectFolderHandle && (
+            <button 
+              onClick={() => saveProjectToDisk(true)}
+              className="flex items-center gap-2 px-4 py-2 bg-stone-800 text-white hover:bg-stone-900 rounded-xl transition-all text-sm font-medium shadow-sm"
+              title="Forçar gravação do estado atual no ficheiro projeto.sqlite"
+            >
+              <Save size={18} />
+              <span>Guardar Agora</span>
+            </button>
+          )}
 
           <button 
             onClick={() => document.getElementById('link-pdfs')?.click()}
