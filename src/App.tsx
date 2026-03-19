@@ -19,6 +19,22 @@ function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+function useDebounce<T>(value: T, delay: number): T {
+  const [debouncedValue, setDebouncedValue] = useState<T>(value);
+
+  React.useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+
+    return () => {
+      clearTimeout(handler);
+    };
+  }, [value, delay]);
+
+  return debouncedValue;
+}
+
 export default function App() {
   const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
@@ -43,11 +59,28 @@ export default function App() {
   const [isDbLoading, setIsDbLoading] = useState(false);
   const [audioModalDoc, setAudioModalDoc] = useState<AnalyzedDocument | null>(null);
   const [audioModalSeek, setAudioModalSeek] = useState<number | null>(null);
+  const [filters, setFilters] = useState({
+    name: '',
+    date: '',
+    presiding: '',
+    topic: '',
+    folder: '',
+    phase: ''
+  });
   const [timelineFilters, setTimelineFilters] = useState({ 
     topic: '', 
     witness: '', 
     phases: ['inquerito', 'instrucao', 'julgamento'] as ('inquerito' | 'instrucao' | 'julgamento')[]
   });
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 20;
+
+  const debouncedFilters = useDebounce(filters, 300);
+  const debouncedTimelineFilters = useDebounce(timelineFilters, 300);
+
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedFilters]);
 
   // Check for API Key on mount
   React.useEffect(() => {
@@ -142,15 +175,6 @@ export default function App() {
   };
 
   // Filters
-  const [filters, setFilters] = useState({
-    name: '',
-    date: '',
-    presiding: '',
-    topic: '',
-    folder: '',
-    phase: ''
-  });
-
   const extractTextFromDoc = async (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -683,13 +707,25 @@ export default function App() {
     if (!file) return;
 
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       try {
-        const project = JSON.parse(e.target?.result as string) as ProjectData;
+        const content = e.target?.result as string;
+        const project = JSON.parse(content);
         
-        const incomingDocs = project.documents.map(doc => ({
+        // Handle both full project objects and simple document arrays
+        const rawDocs = project.documents || (Array.isArray(project) ? project : []);
+        
+        if (rawDocs.length === 0) {
+          showNotify("O ficheiro carregado não contém documentos válidos.", "error");
+          return;
+        }
+
+        const incomingDocs = rawDocs.map((doc: any) => ({
           ...doc,
-          phase: doc.phase || 'inquerito'
+          id: doc.id || crypto.randomUUID(),
+          phase: doc.phase || 'inquerito',
+          topics: doc.topics || [],
+          audioSegments: doc.audioSegments || []
         }));
 
         setDocuments(prev => {
@@ -697,17 +733,17 @@ export default function App() {
           
           // Add existing docs to map
           prev.forEach(doc => {
-            const key = `${doc.folderName}/${doc.fileName}`;
+            const key = doc.id || `${doc.folderName}/${doc.fileName}`;
             mergedMap.set(key, doc);
           });
 
           // Merge incoming docs
-          incomingDocs.forEach(doc => {
-            const key = `${doc.folderName}/${doc.fileName}`;
+          incomingDocs.forEach((doc: any) => {
+            const key = doc.id || `${doc.folderName}/${doc.fileName}`;
             if (mergedMap.has(key)) {
               const existing = mergedMap.get(key);
               // Keep the one with more topics (likely the one analyzed by AI)
-              if ((doc.topics?.length || 0) > (existing.topics?.length || 0)) {
+              if ((doc.topics?.length || 0) >= (existing.topics?.length || 0)) {
                 mergedMap.set(key, doc);
               }
             } else {
@@ -715,16 +751,27 @@ export default function App() {
             }
           });
 
-          return Array.from(mergedMap.values());
+          const result = Array.from(mergedMap.values());
+          
+          // Save all merged documents to DB
+          result.forEach(d => saveDocumentToDb(d));
+          if (projectFolderHandle) {
+            saveProjectToDisk();
+          }
+
+          return result;
         });
 
         showNotify(`${incomingDocs.length} documentos integrados no projeto atual.`, "success");
         setActiveTab('search');
       } catch (err) {
-        showNotify("Erro ao carregar o arquivo de projeto.", "error");
+        console.error("Erro ao carregar projeto:", err);
+        showNotify("Erro ao carregar o arquivo de projeto. Verifique o formato.", "error");
       }
     };
     reader.readAsText(file);
+    // Reset input value to allow loading the same file again
+    event.target.value = '';
   };
 
   const uniqueFolders = useMemo(() => {
@@ -734,19 +781,61 @@ export default function App() {
 
   const filteredDocs = useMemo(() => {
     return documents.filter(doc => {
-      const matchesName = doc.personName.toLowerCase().includes(filters.name.toLowerCase());
-      const matchesDate = doc.date.includes(filters.date);
-      const matchesPresiding = doc.presidingEntity.toLowerCase().includes(filters.presiding.toLowerCase());
-      const matchesFolder = filters.folder === '' || (doc.parentFolder === filters.folder || doc.folderName === filters.folder);
-      const matchesTopic = filters.topic === '' || 
+      const matchesName = doc.personName.toLowerCase().includes(debouncedFilters.name.toLowerCase());
+      const matchesDate = doc.date.includes(debouncedFilters.date);
+      const matchesPresiding = doc.presidingEntity.toLowerCase().includes(debouncedFilters.presiding.toLowerCase());
+      const matchesFolder = debouncedFilters.folder === '' || (doc.parentFolder === debouncedFilters.folder || doc.folderName === debouncedFilters.folder);
+      const matchesTopic = debouncedFilters.topic === '' || 
         doc.topics.some(t => 
-          booleanSearch(t.topic, filters.topic) || 
-          booleanSearch(t.description, filters.topic)
+          booleanSearch(t.topic, debouncedFilters.topic) || 
+          booleanSearch(t.description, debouncedFilters.topic)
         );
-      const matchesPhase = filters.phase === '' || doc.phase === filters.phase;
+      const matchesPhase = debouncedFilters.phase === '' || doc.phase === debouncedFilters.phase;
       return matchesName && matchesDate && matchesPresiding && matchesTopic && matchesFolder && matchesPhase;
     });
-  }, [documents, filters]);
+  }, [documents, debouncedFilters]);
+
+  const paginatedDocs = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return filteredDocs.slice(start, start + itemsPerPage);
+  }, [filteredDocs, currentPage]);
+
+  const totalPages = Math.ceil(filteredDocs.length / itemsPerPage);
+
+  const timelineData = useMemo(() => {
+    const timelineMap: Record<string, { topic: string, witnesses: { doc: AnalyzedDocument, description: string }[] }> = {};
+    const excludeKeywords = [
+      'identificação', 'qualificação', 'relação', 'conhece', 'profissão', 
+      'antecedentes', 'residência', 'percurso profissional', 'carreira', 
+      'currículo', 'trajetória profissional', 'percurso académico', 
+      'relacionamento', 'desconhecimento', 'relações pessoais', 
+      'relações profissionais', 'relações com os arguidos', 
+      'relações de parentesco', 'percurso político', 'recrutamento',
+      'condições contratuais', 'remuneração'
+    ];
+
+    documents.forEach(doc => {
+      const docPhase = doc.phase || 'inquerito';
+      if (!debouncedTimelineFilters.phases.includes(docPhase)) return;
+
+      if (debouncedTimelineFilters.witness && !doc.personName.toLowerCase().includes(debouncedTimelineFilters.witness.toLowerCase())) return;
+
+      doc.topics.forEach(t => {
+        const lowerTopic = t.topic.toLowerCase();
+        if (debouncedTimelineFilters.topic && !lowerTopic.includes(debouncedTimelineFilters.topic.toLowerCase())) return;
+
+        const isExcluded = excludeKeywords.some(key => lowerTopic.includes(key));
+        if (!isExcluded) {
+          if (!timelineMap[t.topic]) {
+            timelineMap[t.topic] = { topic: t.topic, witnesses: [] };
+          }
+          timelineMap[t.topic].witnesses.push({ doc, description: t.description });
+        }
+      });
+    });
+
+    return Object.values(timelineMap).sort((a, b) => b.witnesses.length - a.witnesses.length);
+  }, [documents, debouncedTimelineFilters]);
 
   const getDocsToProcess = () => {
     return filteredDocs.filter(d => {
@@ -1189,49 +1278,7 @@ export default function App() {
 
                 <div className="space-y-16 relative">
                   {(() => {
-                    const timelineMap: Record<string, { topic: string, witnesses: { doc: AnalyzedDocument, description: string }[] }> = {};
-                    const excludeKeywords = [
-                      'identificação', 'qualificação', 'relação', 'conhece', 'profissão', 
-                      'antecedentes', 'residência', 'percurso profissional', 'carreira', 
-                      'currículo', 'trajetória profissional', 'percurso académico', 
-                      'relacionamento', 'desconhecimento', 'relações pessoais', 
-                      'relações profissionais', 'relações com os arguidos', 
-                      'relações de parentesco', 'percurso político', 'recrutamento',
-                      'condições contratuais', 'remuneração'
-                    ];
-
-                    documents.forEach(doc => {
-                      // Filter by phase (with fallback for safety)
-                      const docPhase = doc.phase || 'inquerito';
-                      if (!timelineFilters.phases.includes(docPhase)) {
-                        return;
-                      }
-
-                      // Filter by witness name if filter is active
-                      if (timelineFilters.witness && !doc.personName.toLowerCase().includes(timelineFilters.witness.toLowerCase())) {
-                        return;
-                      }
-
-                      doc.topics.forEach(t => {
-                        const lowerTopic = t.topic.toLowerCase();
-                        
-                        // Filter by topic name if filter is active
-                        if (timelineFilters.topic && !lowerTopic.includes(timelineFilters.topic.toLowerCase())) {
-                          return;
-                        }
-
-                        const isExcluded = excludeKeywords.some(key => lowerTopic.includes(key));
-                        
-                        if (!isExcluded) {
-                          if (!timelineMap[t.topic]) {
-                            timelineMap[t.topic] = { topic: t.topic, witnesses: [] };
-                          }
-                          timelineMap[t.topic].witnesses.push({ doc, description: t.description });
-                        }
-                      });
-                    });
-
-                    const sortedTopics = Object.values(timelineMap).sort((a, b) => b.witnesses.length - a.witnesses.length);
+                    const sortedTopics = timelineData;
 
                     if (sortedTopics.length === 0) {
                       return (
@@ -1394,8 +1441,8 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredDocs.length > 0 ? (
-                      filteredDocs.map(doc => (
+                    {paginatedDocs.length > 0 ? (
+                      paginatedDocs.map(doc => (
                         <tr key={doc.id} className="data-row">
                           <td className="px-6 py-4">
                             <div className="font-medium text-stone-900">{doc.personName}</div>
@@ -1503,6 +1550,33 @@ export default function App() {
                     )}
                   </tbody>
                 </table>
+
+                {totalPages > 1 && (
+                  <div className="px-6 py-4 bg-stone-50 border-t border-stone-200 flex items-center justify-between">
+                    <div className="text-xs text-stone-500">
+                      A mostrar {paginatedDocs.length} de {filteredDocs.length} documentos
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                        disabled={currentPage === 1}
+                        className="p-2 rounded-lg hover:bg-stone-200 disabled:opacity-30 transition-colors"
+                      >
+                        <ChevronRight className="rotate-180" size={18} />
+                      </button>
+                      <span className="text-xs font-bold text-stone-700">
+                        Página {currentPage} de {totalPages}
+                      </span>
+                      <button
+                        onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                        disabled={currentPage === totalPages}
+                        className="p-2 rounded-lg hover:bg-stone-200 disabled:opacity-30 transition-colors"
+                      >
+                        <ChevronRight size={18} />
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             </motion.div>
           )}
