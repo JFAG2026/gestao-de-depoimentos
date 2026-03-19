@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { FolderUp, Search, FileJson, Save, FileText, Loader2, ChevronRight, Edit3, Eye, Filter, ExternalLink, Link, Sparkles, LayoutList, Gavel, Scale, Music, Mic, Play, Key } from 'lucide-react';
+import { FolderUp, Search, FileJson, Save, FileText, Loader2, ChevronRight, Edit3, Eye, Filter, ExternalLink, Link, Sparkles, LayoutList, Gavel, Scale, Music, Mic, Play, Key, Database } from 'lucide-react';
 
 import { motion, AnimatePresence } from 'motion/react';
 import { AnalyzedDocument, ProjectData, AudioSegment } from './types';
@@ -10,7 +10,7 @@ import { extractDataLocally } from './utils/extractor';
 import { booleanSearch } from './utils/search';
 import { analyzeDocumentText, transcribeAudio } from './services/gemini';
 import { generateWordReport } from './utils/wordReport';
-import { initDatabase, saveDocumentToDb, getAllDocumentsFromDb, exportDbBinary } from './services/database';
+import { initDatabase, saveDocumentToDb, getAllDocumentsFromDb, exportDbBinary, getDbType } from './services/database';
 import AudioModal from './components/AudioModal';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -125,8 +125,12 @@ export default function App() {
     const init = async () => {
       try {
         await initDatabase();
+        const docs = await getAllDocumentsFromDb();
+        if (docs.length > 0) {
+          setDocuments(docs);
+        }
       } catch (err) {
-        console.error("Erro ao inicializar base de dados em memória:", err);
+        console.error("Erro ao inicializar base de dados:", err);
       }
     };
     init();
@@ -268,7 +272,9 @@ export default function App() {
     setDocuments(prev => [...prev, ...newDocs]);
     
     // Save to DB if initialized
-    newDocs.forEach(doc => saveDocumentToDb(doc));
+    for (const doc of newDocs) {
+      await saveDocumentToDb(doc);
+    }
     if (projectFolderHandle) {
       saveProjectToDisk();
     }
@@ -318,7 +324,9 @@ export default function App() {
       
       // Se já temos documentos em memória, vamos guardá-los no novo DB
       if (documents.length > 0) {
-        documents.forEach(doc => saveDocumentToDb(doc));
+        for (const doc of documents) {
+          await saveDocumentToDb(doc);
+        }
       }
       
       // Forçar a criação/atualização do ficheiro no disco para confirmar a ligação imediatamente
@@ -339,7 +347,7 @@ export default function App() {
         }
       }
       
-      const docsFromDb = getAllDocumentsFromDb();
+      const docsFromDb = await getAllDocumentsFromDb();
       if (docsFromDb.length > 0) {
         setDocuments(docsFromDb);
       }
@@ -620,7 +628,7 @@ export default function App() {
       };
 
       // Save to DB
-      saveDocumentToDb(updatedDoc);
+      await saveDocumentToDb(updatedDoc);
       if (projectFolderHandle) {
         saveProjectToDisk();
       }
@@ -784,7 +792,7 @@ export default function App() {
           setDocuments(prev => prev.map(d => d.id === doc.id ? updatedDoc : d));
           
           // Save each document as it's processed
-          saveDocumentToDb(updatedDoc);
+          await saveDocumentToDb(updatedDoc);
           if (projectFolderHandle) {
             saveProjectToDisk();
           }
@@ -815,11 +823,12 @@ export default function App() {
     showNotify("Processamento em lote concluído.", "success");
   };
 
-  const handleUpdateDoc = (updatedDoc: AnalyzedDocument) => {
+  const handleUpdateDoc = async (updatedDoc: AnalyzedDocument) => {
     setDocuments(prev => prev.map(d => d.id === updatedDoc.id ? updatedDoc : d));
     
     // Save to DB
-    saveDocumentToDb(updatedDoc);
+    await saveDocumentToDb(updatedDoc);
+    
     if (projectFolderHandle) {
       saveProjectToDisk();
     }
@@ -912,19 +921,31 @@ export default function App() {
           )}
 
           {!isInIframe && (
-            <button 
-              onClick={handleSelectProjectFolder}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border",
-                projectFolderHandle 
-                  ? "bg-emerald-50 text-emerald-700 border-emerald-100" 
-                  : "bg-stone-100 text-stone-600 hover:bg-stone-200 border-stone-200"
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={handleSelectProjectFolder}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border",
+                  projectFolderHandle 
+                    ? "bg-emerald-50 text-emerald-700 border-emerald-100" 
+                    : "bg-stone-100 text-stone-600 hover:bg-stone-200 border-stone-200"
+                )}
+                title="Selecionar pasta para guardar automaticamente o projeto em SQLite"
+              >
+                <Save size={18} />
+                <span>{projectFolderHandle ? "Projeto SQLite Ativo" : "Vincular Pasta Projeto (SQLite)"}</span>
+              </button>
+
+              {getDbType() === 'postgres' && (
+                <div 
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-blue-50 text-blue-700 border border-blue-100"
+                  title="A base de dados Cloud (Vercel Postgres) está ativa e sincronizada"
+                >
+                  <Database size={18} />
+                  <span>Cloud DB Ativa</span>
+                </div>
               )}
-              title="Selecionar pasta para guardar automaticamente o projeto em SQLite"
-            >
-              <Save size={18} />
-              <span>{projectFolderHandle ? "Projeto SQLite Ativo" : "Vincular Pasta Projeto (SQLite)"}</span>
-            </button>
+            </div>
           )}
 
           {projectFolderHandle && (

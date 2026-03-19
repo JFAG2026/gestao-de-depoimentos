@@ -2,10 +2,23 @@ import initSqlJs, { Database } from 'sql.js';
 
 let db: Database | null = null;
 let SQL: any = null;
+let dbType: 'sqlite' | 'postgres' = 'sqlite';
 
 const SQLITE_WASM_URL = 'https://sql.js.org/dist/sql-wasm.wasm';
 
-export const initDatabase = async (existingData?: Uint8Array): Promise<Database> => {
+export const initDatabase = async (existingData?: Uint8Array): Promise<Database | null> => {
+  try {
+    const statusRes = await fetch('/api/db-status');
+    const status = await statusRes.json();
+    if (status.isPostgresAvailable) {
+      dbType = 'postgres';
+      console.log("Using server-side Postgres database.");
+      return null; // No local DB needed
+    }
+  } catch (err) {
+    console.log("Server-side DB not available, falling back to SQLite.");
+  }
+
   if (!SQL) {
     SQL = await initSqlJs({
       locateFile: () => SQLITE_WASM_URL
@@ -13,6 +26,7 @@ export const initDatabase = async (existingData?: Uint8Array): Promise<Database>
   }
   
   db = new SQL.Database(existingData);
+  dbType = 'sqlite';
   
   // Create tables if they don't exist
   db.run(`
@@ -37,8 +51,22 @@ export const initDatabase = async (existingData?: Uint8Array): Promise<Database>
 };
 
 export const getDb = () => db;
+export const getDbType = () => dbType;
 
-export const saveDocumentToDb = (doc: any) => {
+export const saveDocumentToDb = async (doc: any) => {
+  if (dbType === 'postgres') {
+    try {
+      await fetch('/api/documents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(doc)
+      });
+    } catch (err) {
+      console.error("Error saving to Postgres:", err);
+    }
+    return;
+  }
+
   if (!db) return;
   
   const stmt = db.prepare(`
@@ -66,7 +94,17 @@ export const saveDocumentToDb = (doc: any) => {
   stmt.free();
 };
 
-export const getAllDocumentsFromDb = (): any[] => {
+export const getAllDocumentsFromDb = async (): Promise<any[]> => {
+  if (dbType === 'postgres') {
+    try {
+      const res = await fetch('/api/documents');
+      return await res.json();
+    } catch (err) {
+      console.error("Error fetching from Postgres:", err);
+      return [];
+    }
+  }
+
   if (!db) return [];
   
   const res = db.exec("SELECT * FROM documents");
@@ -91,6 +129,6 @@ export const getAllDocumentsFromDb = (): any[] => {
 };
 
 export const exportDbBinary = (): Uint8Array | null => {
-  if (!db) return null;
+  if (!db || dbType !== 'sqlite') return null;
   return db.export();
 };
