@@ -803,6 +803,8 @@ export default function App() {
   const totalPages = Math.ceil(filteredDocs.length / itemsPerPage);
 
   const timelineData = useMemo(() => {
+    if (activeTab !== 'timeline') return [];
+    
     const timelineMap: Record<string, { topic: string, witnesses: { doc: AnalyzedDocument, description: string }[] }> = {};
     const excludeKeywords = [
       'identificação', 'qualificação', 'relação', 'conhece', 'profissão', 
@@ -835,7 +837,7 @@ export default function App() {
     });
 
     return Object.values(timelineMap).sort((a, b) => b.witnesses.length - a.witnesses.length);
-  }, [documents, debouncedTimelineFilters]);
+  }, [documents, debouncedTimelineFilters, activeTab]);
 
   const getDocsToProcess = () => {
     return filteredDocs.filter(d => {
@@ -870,6 +872,8 @@ export default function App() {
       setProcessingProgress({ current: 0, total: docsToProcess.length });
       showNotify(`A iniciar processamento de ${docsToProcess.length} documentos...`, "info");
 
+      const updatedDocs: AnalyzedDocument[] = [];
+      
       for (let i = 0; i < docsToProcess.length; i++) {
         const doc = docsToProcess[i];
         setProcessingProgress({ current: i + 1, total: docsToProcess.length });
@@ -878,17 +882,16 @@ export default function App() {
         
         try {
           const updatedDoc = await executeAiAnalysis(doc, (curr, total) => setAiProgress({ current: curr, total }));
+          updatedDocs.push(updatedDoc);
+          
           setDocuments(prev => prev.map(d => d.id === doc.id ? updatedDoc : d));
           
-          // Save each document as it's processed
+          // Save each document to DB (fast)
           await saveDocumentToDb(updatedDoc);
-          if (projectFolderHandle) {
-            saveProjectToDisk();
-          }
           
           // Add a small delay between requests to avoid hitting rate limits too fast
           if (i < docsToProcess.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            await new Promise(resolve => setTimeout(resolve, 2000));
           }
         } catch (error: any) {
           console.error(`Erro ao processar ${doc.fileName}:`, error);
@@ -897,11 +900,13 @@ export default function App() {
           }
         }
       }
-      
-      // Final save to ensure everything is on disk after bulk processing
-      if (projectFolderHandle) {
+
+      // Save to disk only once at the end of bulk processing
+      if (projectFolderHandle && updatedDocs.length > 0) {
         await saveProjectToDisk();
       }
+      
+      showNotify(`Processamento em lote concluído. ${updatedDocs.length} documentos analisados.`, "success");
     } catch (error) {
       console.error("Erro no processamento em lote:", error);
       showNotify("Ocorreu um erro ao iniciar o processamento em lote.", "error");
@@ -909,7 +914,6 @@ export default function App() {
       setIsAiProcessing(false);
       setCurrentlyProcessingId(null);
     }
-    showNotify("Processamento em lote concluído.", "success");
   };
 
   const handleUpdateDoc = async (updatedDoc: AnalyzedDocument) => {
