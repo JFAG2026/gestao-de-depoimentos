@@ -6,11 +6,16 @@ import cors from "cors";
 import { sql } from "@vercel/postgres";
 
 async function startServer() {
+  console.log("Starting server.ts...");
   const app = express();
   const PORT = 3000;
 
   app.use(express.json({ limit: '50mb' }));
   app.use(cors());
+
+  app.get("/health", (req, res) => {
+    res.json({ status: "ok", time: new Date().toISOString() });
+  });
 
   // Check if Postgres is available
   const isPostgresAvailable = !!process.env.POSTGRES_URL;
@@ -41,15 +46,19 @@ async function startServer() {
     }
   }
 
-  // API routes
-  app.get("/api/db-status", (req, res) => {
+  // API Router
+  const apiRouter = express.Router();
+
+  apiRouter.get("/db-status", (req, res) => {
+    console.log("API: GET /db-status");
     res.json({ 
       isPostgresAvailable,
       type: isPostgresAvailable ? 'postgres' : 'none'
     });
   });
 
-  app.get("/api/documents", async (req, res) => {
+  apiRouter.get("/documents", async (req, res) => {
+    console.log("API: GET /documents");
     if (!isPostgresAvailable) return res.status(404).json({ error: "Postgres not available" });
     try {
       const { rows } = await sql`SELECT * FROM documents ORDER BY createdAt DESC`;
@@ -60,7 +69,8 @@ async function startServer() {
     }
   });
 
-  app.post("/api/documents", async (req, res) => {
+  apiRouter.post("/documents", async (req, res) => {
+    console.log("API: POST /documents");
     if (!isPostgresAvailable) return res.status(404).json({ error: "Postgres not available" });
     try {
       const doc = req.body;
@@ -94,7 +104,8 @@ async function startServer() {
     }
   });
 
-  app.post("/api/extract-text", async (req, res) => {
+  apiRouter.post("/extract-text", async (req, res) => {
+    console.log("API: POST /extract-text");
     try {
       const { base64, fileName } = req.body;
       const buffer = Buffer.from(base64, 'base64');
@@ -111,6 +122,8 @@ async function startServer() {
       res.status(500).json({ error: "Failed to extract text" });
     }
   });
+
+  app.use("/api", apiRouter);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
