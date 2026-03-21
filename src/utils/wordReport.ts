@@ -151,3 +151,92 @@ export const generateWordReport = async (documents: AnalyzedDocument[]) => {
   const blob = await Packer.toBlob(doc);
   saveAs(blob, `Relatorio_JurisAnalyzer_${new Date().toISOString().split('T')[0]}.docx`);
 };
+
+export const exportTranscriptionToWord = async (docData: AnalyzedDocument) => {
+  const children: any[] = [
+    new Paragraph({
+      text: `TRANSCRIÇÃO: ${docData.fileName}`,
+      heading: HeadingLevel.HEADING_1,
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 400 },
+    }),
+    new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          children: [
+            new TableCell({
+              children: [
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: "TESTEMUNHA/ARGUIDO: ", bold: true }),
+                    new TextRun({ text: docData.personName.toUpperCase() }),
+                  ],
+                }),
+                new Paragraph({
+                  children: [
+                    new TextRun({ text: "DATA: ", bold: true }),
+                    new TextRun({ text: docData.date }),
+                  ],
+                }),
+              ],
+            }),
+          ],
+        }),
+      ],
+    }),
+    new Paragraph({ text: "", spacing: { before: 200, after: 200 } }),
+  ];
+
+  if (docData.audioSegments && docData.audioSegments.length > 0) {
+    docData.audioSegments.forEach(segment => {
+      children.push(
+        new Paragraph({
+          spacing: { before: 100 },
+          children: [
+            new TextRun({
+              text: `[${segment.timestamp}] `,
+              bold: true,
+              color: "4B5563",
+              size: 18,
+            }),
+            new TextRun({
+              text: segment.speaker ? `${docData.speakerAliases?.[segment.speaker] || segment.speaker}: ` : "",
+              bold: true,
+              color: "2563EB",
+            }),
+            new TextRun({
+              text: segment.text,
+            }),
+          ],
+        })
+      );
+    });
+  } else {
+    // Fallback to raw text if no segments
+    children.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: docData.rawText || "Sem transcrição disponível.",
+          }),
+        ],
+      })
+    );
+  }
+
+  const doc = new Document({
+    styles: {
+      default: {
+        document: {
+          run: { font: "Calibri", size: 22 },
+          paragraph: { alignment: AlignmentType.JUSTIFIED, spacing: { line: 360 } },
+        },
+      },
+    },
+    sections: [{ children }],
+  });
+
+  const blob = await Packer.toBlob(doc);
+  saveAs(blob, `Transcricao_${docData.personName.replace(/\s+/g, '_')}_${docData.fileName.split('.')[0]}.docx`);
+};

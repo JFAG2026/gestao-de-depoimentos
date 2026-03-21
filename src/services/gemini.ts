@@ -166,7 +166,7 @@ export const transcribeAudio = async (file: Blob | File, fileName: string, offse
   }, fileName);
 };
 
-export const analyzeDocumentText = async (text: string, fileName: string, folderName: string, file?: File): Promise<{ topics: any[] }> => {
+export const analyzeDocumentText = async (text: string, fileName: string, folderName: string, file?: File): Promise<{ personName: string; topics: any[] }> => {
   return withRetry(async (ai) => {
     const isPdf = fileName.toLowerCase().endsWith('.pdf');
     const cleanedText = text.replace(/\[PÁGINA \d+\]/g, '').trim();
@@ -189,12 +189,13 @@ export const analyzeDocumentText = async (text: string, fileName: string, folder
           Analise o PDF anexo (${fileName} na pasta ${folderName}) e extraia os principais tópicos, questões e factos discutidos.
           
           INSTRUÇÕES CRÍTICAS PARA OS TÓPICOS:
-          1. Identifica os temas centrais do interrogatório/inquirição. 
-          2. Para cada tema, cria um título (campo 'topic') que seja OBRIGATORIAMENTE claro, contextual e autoexplicativo (ex: "Contradição sobre a entrega de 50.000€ no Porto" em vez de "Contradição").
-          3. No campo 'description', resume o que foi perguntado e o que foi respondido sobre esse tema.
-          4. No campo 'quote', extrai uma citação literal (ipsis verbis) que seja a prova mais relevante desse tópico.
-          5. Se identificares carimbos de tempo [MM:SS] ou números de página, coloca-os nos campos 'timestamps' e 'pages' respetivamente.
-          6. Se o documento for um interrogatório, foca-te nas perguntas incisivas e nas respostas que confirmam ou negam factos da acusação.` }
+          1. Identifica o nome da pessoa que está a prestar o depoimento (testemunha, arguido, etc.). Coloca no campo 'personName'.
+          2. Identifica os temas centrais do interrogatório/inquirição. 
+          3. Para cada tema, cria um título (campo 'topic') que seja OBRIGATORIAMENTE claro, contextual e autoexplicativo (ex: "Contradição sobre a entrega de 50.000€ no Porto" em vez de "Contradição").
+          4. No campo 'description', resume o que foi perguntado e o que foi respondido sobre esse tema.
+          5. No campo 'quote', extrai uma citação literal (ipsis verbis) que seja a prova mais relevante desse tópico.
+          6. Se identificares carimbos de tempo [MM:SS] ou números de página, coloca-os nos campos 'timestamps' e 'pages' respetivamente.
+          7. Se o documento for um interrogatório, foca-te nas perguntas incisivas e nas respostas que confirmam ou negam factos da acusação.` }
         ]
       };
     } else {
@@ -202,13 +203,14 @@ export const analyzeDocumentText = async (text: string, fileName: string, folder
       Analise o seguinte texto de um documento jurídico (${fileName} na pasta ${folderName}) e extraia os principais tópicos, questões e factos discutidos.
       
       INSTRUÇÕES CRÍTICAS PARA OS TÓPICOS:
-      1. Identifica os temas centrais do interrogatório/inquirição. 
-      2. Para cada tema, cria um título (campo 'topic') que seja OBRIGATORIAMENTE claro, contextual e autoexplicativo (ex: "Contradição sobre a entrega de 50.000€ no Porto" em vez de "Contradição").
-      3. No campo 'description', resume o que foi perguntado e o que foi respondido sobre esse tema.
-      4. No campo 'quote', extrai uma citação literal (ipsis verbis) que seja a prova mais relevante desse tópico.
-      5. Se o texto contiver carimbos de tempo [MM:SS], extrai-os para o campo 'timestamps'.
-      6. Se o texto contiver [PÁGINA X], extrai o número para o campo 'pages'.
-      7. Se o documento for um interrogatório, foca-te nas perguntas incisivas e nas respostas que confirmam ou negam factos da acusação.
+      1. Identifica o nome da pessoa que está a prestar o depoimento (testemunha, arguido, etc.). Coloca no campo 'personName'.
+      2. Identifica os temas centrais do interrogatório/inquirição. 
+      3. Para cada tema, cria um título (campo 'topic') que seja OBRIGATORIAMENTE claro, contextual e autoexplicativo (ex: "Contradição sobre a entrega de 50.000€ no Porto" em vez de "Contradição").
+      4. No campo 'description', resume o que foi perguntado e o que foi respondido sobre esse tema.
+      5. No campo 'quote', extrai uma citação literal (ipsis verbis) que seja a prova mais relevante desse tópico.
+      6. Se o texto contiver carimbos de tempo [MM:SS], extrai-os para o campo 'timestamps'.
+      7. Se o texto contiver [PÁGINA X], extrai o número para o campo 'pages'.
+      8. Se o documento for um interrogatório, foca-te nas perguntas incisivas e nas respostas que confirmam ou negam factos da acusação.
 
       Texto:
       ${text.substring(0, 35000)}`;
@@ -222,6 +224,7 @@ export const analyzeDocumentText = async (text: string, fileName: string, folder
         responseSchema: {
           type: Type.OBJECT,
           properties: {
+            personName: { type: Type.STRING, description: "Nome completo da testemunha ou arguido identificado no documento." },
             topics: {
               type: Type.ARRAY,
               items: {
@@ -245,16 +248,16 @@ export const analyzeDocumentText = async (text: string, fileName: string, folder
               }
             }
           },
-          required: ["topics"]
+          required: ["personName", "topics"]
         }
       }
     });
 
     try {
-      return JSON.parse(response.text || '{"topics": []}');
+      return JSON.parse(response.text || '{"personName": "Desconhecido", "topics": []}');
     } catch (e) {
       console.error("Failed to parse Gemini response", e);
-      return { topics: [] };
+      return { personName: "Desconhecido", topics: [] };
     }
   }, fileName);
 };

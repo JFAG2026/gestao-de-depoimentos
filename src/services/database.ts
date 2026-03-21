@@ -132,3 +132,20 @@ export const exportDbBinary = (): Uint8Array | null => {
   if (!db || dbType !== 'sqlite') return null;
   return db.export();
 };
+
+export const checkDbIntegrity = (): { ok: boolean; message: string } => {
+  if (dbType === 'postgres') return { ok: true, message: "Postgres database managed by server." };
+  if (!db) return { ok: false, message: "Database not initialized." };
+  
+  try {
+    const res = db.exec("PRAGMA integrity_check;");
+    if (res.length > 0 && res[0].values[0][0] === 'ok') {
+      const countRes = db.exec("SELECT COUNT(*) FROM documents;");
+      const count = countRes[0].values[0][0];
+      return { ok: true, message: `Integridade OK. ${count} documentos na base de dados.` };
+    }
+    return { ok: false, message: "Erro de integridade detetado." };
+  } catch (err: any) {
+    return { ok: false, message: "Erro ao verificar: " + err.message };
+  }
+};

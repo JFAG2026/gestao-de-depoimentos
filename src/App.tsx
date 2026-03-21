@@ -1,16 +1,16 @@
 import React, { useState, useMemo } from 'react';
-import { FolderUp, Search, FileJson, Save, FileText, Loader2, ChevronRight, Edit3, Eye, Filter, ExternalLink, Link, Sparkles, LayoutList, Gavel, Scale, Music, Mic, Play, Key, Database } from 'lucide-react';
+import { FolderUp, Search, FileJson, Save, FileText, Loader2, ChevronRight, Edit3, Eye, Filter, ExternalLink, Link, Sparkles, LayoutList, Gavel, Scale, Music, Mic, Play, Key, Database, Bot } from 'lucide-react';
 
 import { motion, AnimatePresence } from 'motion/react';
 import { AnalyzedDocument, ProjectData, AudioSegment } from './types';
-import { extractTextFromPdf } from './utils/pdf';
-import { extractTextFromWord } from './utils/word';
+import pLimit from 'p-limit';
 import { extractTextFromDoc } from './utils/doc';
 import { extractDataLocally } from './utils/extractor';
 import { booleanSearch } from './utils/search';
 import { analyzeDocumentText, transcribeAudio } from './services/gemini';
-import { generateWordReport } from './utils/wordReport';
-import { initDatabase, saveDocumentToDb, getAllDocumentsFromDb, exportDbBinary, getDbType } from './services/database';
+import { generateWordReport, exportTranscriptionToWord } from './utils/wordReport';
+import { initDatabase, saveDocumentToDb, getAllDocumentsFromDb, exportDbBinary, getDbType, checkDbIntegrity } from './services/database';
+import Chatbot from './components/Chatbot';
 import AudioModal from './components/AudioModal';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -44,7 +44,7 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isAiProcessing, setIsAiProcessing] = useState(false);
   const [currentlyProcessingId, setCurrentlyProcessingId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'inquerito' | 'instrucao' | 'julgamento' | 'search' | 'timeline'>('search');
+  const [activeTab, setActiveTab] = useState<'inquerito' | 'instrucao' | 'julgamento' | 'search' | 'timeline' | 'chatbot'>('search');
   const [processingProgress, setProcessingProgress] = useState({ current: 0, total: 0 });
   const [selectedDoc, setSelectedDoc] = useState<AnalyzedDocument | null>(null);
   const [modalView, setModalView] = useState<'text' | 'summary' | 'transcript'>('summary');
@@ -55,10 +55,14 @@ export default function App() {
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportPhases, setReportPhases] = useState<('inquerito' | 'instrucao' | 'julgamento')[]>(['inquerito', 'instrucao', 'julgamento']);
   const [isAudioModalOpen, setIsAudioModalOpen] = useState(false);
+  const [isLowPowerMode, setIsLowPowerMode] = useState(() => localStorage.getItem('lowPowerMode') === 'true');
   const [projectFolderHandle, setProjectFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [isDbLoading, setIsDbLoading] = useState(false);
+  const [isPickerLoading, setIsPickerLoading] = useState(false);
   const [audioModalDoc, setAudioModalDoc] = useState<AnalyzedDocument | null>(null);
   const [audioModalSeek, setAudioModalSeek] = useState<number | null>(null);
+  const isPickerActive = React.useRef(false);
+  const extractorWorker = React.useRef<Worker | null>(null);
   const [filters, setFilters] = useState({
     name: '',
     date: '',
@@ -81,6 +85,17 @@ export default function App() {
   React.useEffect(() => {
     setCurrentPage(1);
   }, [debouncedFilters]);
+
+  React.useEffect(() => {
+    localStorage.setItem('lowPowerMode', String(isLowPowerMode));
+  }, [isLowPowerMode]);
+
+  React.useEffect(() => {
+    extractorWorker.current = new Worker(new URL('./workers/extractor.worker.ts', import.meta.url), { type: 'module' });
+    return () => {
+      extractorWorker.current?.terminate();
+    };
+  }, []);
 
   // Check for API Key on mount
   React.useEffect(() => {
@@ -174,6 +189,31 @@ export default function App() {
     setTimeout(() => setNotification(null), 5000);
   };
 
+  const extractTextWithWorker = (file: File, type: 'pdf' | 'docx'): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      if (!extractorWorker.current) {
+        reject(new Error("Worker de extração não inicializado."));
+        return;
+      }
+
+      const id = Math.random().toString(36).substring(7);
+      
+      const handleMessage = (e: MessageEvent) => {
+        if (e.data.id === id) {
+          extractorWorker.current?.removeEventListener('message', handleMessage);
+          if (e.data.success) {
+            resolve(e.data.text);
+          } else {
+            reject(new Error(e.data.error || "Erro desconhecido no worker."));
+          }
+        }
+      };
+
+      extractorWorker.current.addEventListener('message', handleMessage);
+      extractorWorker.current.postMessage({ file, type, id });
+    });
+  };
+
   // Filters
   const extractTextFromDoc = async (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -222,9 +262,9 @@ export default function App() {
           const isAudio = name.endsWith('.mp3') || name.endsWith('.wav') || name.endsWith('.m4a') || name.endsWith('.aac') || name.endsWith('.ogg');
           
           if (name.endsWith('.pdf')) {
-            text = await extractTextFromPdf(file);
+            text = await extractTextWithWorker(file, 'pdf');
           } else if (name.endsWith('.docx')) {
-            text = await extractTextFromWord(file);
+            text = await extractTextWithWorker(file, 'docx');
           } else if (name.endsWith('.doc')) {
             text = await extractTextFromDoc(file);
           } else if (isAudio) {
@@ -325,6 +365,9 @@ export default function App() {
   };
 
   const handleSelectProjectFolder = async () => {
+    if (isPickerActive.current) return;
+    isPickerActive.current = true;
+    setIsPickerLoading(true);
     try {
       // @ts-ignore - File System Access API
       const handle = await window.showDirectoryPicker({
@@ -385,6 +428,9 @@ export default function App() {
         showNotify("Erro ao aceder à pasta do projeto: " + err.message, "error");
       }
       setIsDbLoading(false);
+    } finally {
+      isPickerActive.current = false;
+      setIsPickerLoading(false);
     }
   };
 
@@ -450,18 +496,40 @@ export default function App() {
   };
 
   const saveProject = () => {
-    const project: ProjectData = {
-      name: "Projeto JurisAnalyzer",
-      lastUpdated: new Date().toISOString(),
-      documents
+    const docs = documents.filter(d => !d.isAudio);
+    const audios = documents.filter(d => d.isAudio);
+
+    const saveFile = (data: any, fileName: string) => {
+      const project = {
+        name: "Projeto JurisAnalyzer",
+        lastUpdated: new Date().toISOString(),
+        documents: data
+      };
+      // Remove indentation for performance
+      const blob = new Blob([JSON.stringify(project)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${fileName}-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
     };
-    const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `projeto-jurisanalyzer-${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+
+    if (docs.length > 0) {
+      saveFile(docs, 'projeto-documentos');
+    }
+    if (audios.length > 0) {
+      // Small delay to avoid browser blocking multiple downloads
+      setTimeout(() => {
+        saveFile(audios, 'projeto-audios');
+      }, 500);
+    }
+    
+    if (docs.length === 0 && audios.length === 0) {
+      showNotify("Não existem documentos para exportar.", "info");
+    } else {
+      showNotify("Exportação iniciada. Verifique os downloads.", "success");
+    }
   };
 
   const handleLinkPdfs = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -575,8 +643,8 @@ export default function App() {
           throw new Error(`Ficheiro áudio "${doc.fileName}" não encontrado. Por favor, use o botão 'Vincular Pastas' para localizar o arquivo original antes de analisar.`);
         }
 
-        // Check file size. If > 15MB, we split it.
-        const CHUNK_SIZE_MB = 15;
+        // Check file size. If > 18MB, we split it.
+        const CHUNK_SIZE_MB = 18;
         const fileSizeMB = file.size / (1024 * 1024);
         
         if (fileSizeMB > CHUNK_SIZE_MB) {
@@ -591,26 +659,38 @@ export default function App() {
             audio.onerror = () => resolve(0);
           });
 
-          const CHUNK_DURATION = 600; // 10 minutes per chunk
+          const CHUNK_DURATION = 900; // 15 minutes per chunk
           const numChunks = Math.ceil(duration / CHUNK_DURATION) || Math.ceil(fileSizeMB / CHUNK_SIZE_MB);
           if (onProgress) onProgress(0, numChunks);
 
           let combinedText = "";
           let combinedSegments: AudioSegment[] = [];
+          let completedChunks = 0;
 
-          for (let i = 0; i < numChunks; i++) {
-            if (onProgress) onProgress(i + 1, numChunks);
-            
-            const startByte = Math.floor((i / numChunks) * file.size);
-            const endByte = Math.floor(((i + 1) / numChunks) * file.size);
-            const chunkBlob = file.slice(startByte, endByte, file.type);
-            
-            // Estimate offset based on time
-            const offsetSeconds = i * (duration / numChunks);
-            
-            const transcription = await transcribeAudio(chunkBlob, `${file.name} (Parte ${i+1})`, offsetSeconds);
-            combinedText += (combinedText ? "\n\n" : "") + transcription.fullText;
-            combinedSegments = [...combinedSegments, ...transcription.segments];
+          const limit = pLimit(3); // Process 3 chunks at a time to avoid rate limits
+          const transcriptionPromises = Array.from({ length: numChunks }).map((_, i) => {
+            return limit(async () => {
+              const startByte = Math.floor((i / numChunks) * file.size);
+              const endByte = Math.floor(((i + 1) / numChunks) * file.size);
+              const chunkBlob = file.slice(startByte, endByte, file.type);
+              
+              // Estimate offset based on time
+              const offsetSeconds = i * (duration / numChunks);
+              
+              const transcription = await transcribeAudio(chunkBlob, `${file.name} (Parte ${i+1})`, offsetSeconds);
+              
+              completedChunks++;
+              if (onProgress) onProgress(completedChunks, numChunks);
+              
+              return transcription;
+            });
+          });
+
+          const results = await Promise.all(transcriptionPromises);
+          
+          for (const res of results) {
+            combinedText += (combinedText ? "\n\n" : "") + res.fullText;
+            combinedSegments = [...combinedSegments, ...res.segments];
           }
           
           textToAnalyze = combinedText;
@@ -625,9 +705,9 @@ export default function App() {
         // Re-extract text for non-audio if file is available to get page markers
         const name = file.name.toLowerCase();
         if (name.endsWith('.pdf')) {
-          textToAnalyze = await extractTextFromPdf(file);
+          textToAnalyze = await extractTextWithWorker(file, 'pdf');
         } else if (name.endsWith('.docx')) {
-          textToAnalyze = await extractTextFromWord(file);
+          textToAnalyze = await extractTextWithWorker(file, 'docx');
         } else if (name.endsWith('.doc')) {
           textToAnalyze = await extractTextFromDoc(file);
         }
@@ -646,6 +726,7 @@ export default function App() {
 
       const updatedDoc = {
         ...doc,
+        personName: analysis.personName && analysis.personName !== "Desconhecido" ? analysis.personName : doc.personName,
         topics: analysis.topics || [],
         rawText: textToAnalyze,
         audioSegments: audioSegments
@@ -703,22 +784,22 @@ export default function App() {
     }
   };
   const loadProject = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
 
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      try {
-        const content = e.target?.result as string;
-        const project = JSON.parse(content);
-        
-        // Handle both full project objects and simple document arrays
-        const rawDocs = project.documents || (Array.isArray(project) ? project : []);
-        
-        if (rawDocs.length === 0) {
-          showNotify("O ficheiro carregado não contém documentos válidos.", "error");
-          return;
-        }
+    Array.from(files).forEach((file: File) => {
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const content = e.target?.result as string;
+          const project = JSON.parse(content);
+          
+          // Handle both full project objects and simple document arrays
+          const rawDocs = project.documents || (Array.isArray(project) ? project : []);
+          
+          if (rawDocs.length === 0) {
+            return;
+          }
 
         const incomingDocs = rawDocs.map((doc: any) => ({
           ...doc,
@@ -762,14 +843,14 @@ export default function App() {
           return result;
         });
 
-        showNotify(`${incomingDocs.length} documentos integrados no projeto atual.`, "success");
-        setActiveTab('search');
+        showNotify(`${file.name} carregado com sucesso.`, "success");
       } catch (err) {
         console.error("Erro ao carregar projeto:", err);
         showNotify("Erro ao carregar o arquivo de projeto. Verifique o formato.", "error");
       }
     };
     reader.readAsText(file);
+  });
     // Reset input value to allow loading the same file again
     event.target.value = '';
   };
@@ -786,6 +867,8 @@ export default function App() {
       const matchesPresiding = doc.presidingEntity.toLowerCase().includes(debouncedFilters.presiding.toLowerCase());
       const matchesFolder = debouncedFilters.folder === '' || (doc.parentFolder === debouncedFilters.folder || doc.folderName === debouncedFilters.folder);
       const matchesTopic = debouncedFilters.topic === '' || 
+        booleanSearch(doc.rawText, debouncedFilters.topic) ||
+        booleanSearch(doc.fileName, debouncedFilters.topic) ||
         doc.topics.some(t => 
           booleanSearch(t.topic, debouncedFilters.topic) || 
           booleanSearch(t.description, debouncedFilters.topic)
@@ -873,33 +956,38 @@ export default function App() {
       showNotify(`A iniciar processamento de ${docsToProcess.length} documentos...`, "info");
 
       const updatedDocs: AnalyzedDocument[] = [];
+      let completedCount = 0;
       
-      for (let i = 0; i < docsToProcess.length; i++) {
-        const doc = docsToProcess[i];
-        setProcessingProgress({ current: i + 1, total: docsToProcess.length });
-        setCurrentlyProcessingId(doc.id);
-        setAiProgress({ current: 0, total: 0 });
-        
-        try {
-          const updatedDoc = await executeAiAnalysis(doc, (curr, total) => setAiProgress({ current: curr, total }));
-          updatedDocs.push(updatedDoc);
+      const limit = pLimit(2); // Process 2 documents at a time in bulk
+      const bulkPromises = docsToProcess.map(async (doc) => {
+        return limit(async () => {
+          setCurrentlyProcessingId(doc.id);
           
-          setDocuments(prev => prev.map(d => d.id === doc.id ? updatedDoc : d));
-          
-          // Save each document to DB (fast)
-          await saveDocumentToDb(updatedDoc);
-          
-          // Add a small delay between requests to avoid hitting rate limits too fast
-          if (i < docsToProcess.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 2000));
+          try {
+            const updatedDoc = await executeAiAnalysis(doc, (curr, total) => {
+              // Only update aiProgress if this is the currently highlighted doc in the UI
+              // or we can just let it update if we only show it for the selected doc
+              setAiProgress({ current: curr, total });
+            });
+            
+            updatedDocs.push(updatedDoc);
+            setDocuments(prev => prev.map(d => d.id === doc.id ? updatedDoc : d));
+            
+            // Save each document to DB (fast)
+            await saveDocumentToDb(updatedDoc);
+            
+            completedCount++;
+            setProcessingProgress({ current: completedCount, total: docsToProcess.length });
+          } catch (error: any) {
+            console.error(`Erro ao processar ${doc.fileName}:`, error);
+            if (error.message?.includes('Vincular Pastas')) {
+              showNotify(error.message, "error");
+            }
           }
-        } catch (error: any) {
-          console.error(`Erro ao processar ${doc.fileName}:`, error);
-          if (error.message?.includes('Vincular Pastas')) {
-            showNotify(error.message, "error");
-          }
-        }
-      }
+        });
+      });
+
+      await Promise.all(bulkPromises);
 
       // Save to disk only once at the end of bulk processing
       if (projectFolderHandle && updatedDocs.length > 0) {
@@ -928,6 +1016,34 @@ export default function App() {
     
     setIsEditModalOpen(false);
     setSelectedDoc(null);
+  };
+
+  const handleCheckIntegrity = () => {
+    const result = checkDbIntegrity();
+    if (result.ok) {
+      showNotify(result.message, "success");
+    } else {
+      showNotify(result.message, "error");
+    }
+  };
+
+  const handleDownloadDb = () => {
+    const binary = exportDbBinary();
+    if (!binary) {
+      showNotify("Não foi possível exportar a base de dados.", "error");
+      return;
+    }
+    
+    const blob = new Blob([binary], { type: 'application/x-sqlite3' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'projeto.sqlite';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showNotify("Base de dados descarregada com sucesso.", "success");
   };
 
   const ensureApiKey = async () => {
@@ -963,7 +1079,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col">
+    <div className={cn("min-h-screen flex flex-col", isLowPowerMode && "no-animations")}>
       {/* Header */}
       <header className="bg-white border-b border-stone-200 px-8 py-4 flex items-center justify-between sticky top-0 z-10">
         <div className="flex items-center gap-3">
@@ -989,11 +1105,25 @@ export default function App() {
           </div>
 
           <button 
+            onClick={() => setIsLowPowerMode(prev => !prev)}
+            className={cn(
+              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border",
+              isLowPowerMode 
+                ? "bg-amber-50 text-amber-700 border-amber-100" 
+                : "text-stone-600 hover:bg-stone-50 border-stone-200"
+            )}
+            title={isLowPowerMode ? "Desativar Modo de Baixo Consumo" : "Ativar Modo de Baixo Consumo (desativa animações pesadas)"}
+          >
+            <div className={cn("w-2 h-2 rounded-full", isLowPowerMode ? "bg-amber-500 animate-pulse" : "bg-stone-300")} />
+            <span>{isLowPowerMode ? "Baixo Consumo: ON" : "Modo Performance"}</span>
+          </button>
+
+          <button 
             onClick={handleSelectKey}
             className={cn(
               "flex items-center gap-2 px-4 py-2 rounded-xl transition-colors text-sm font-medium border",
               hasApiKey === false 
-                ? "bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100 animate-pulse" 
+                ? cn("bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100", !isLowPowerMode && "animate-pulse")
                 : "text-stone-600 hover:bg-stone-50 border-stone-200"
             )}
             title={hasApiKey === false ? "Chave de API em falta! Clique para configurar." : "Configurar chave de API do Gemini"}
@@ -1017,15 +1147,17 @@ export default function App() {
             <div className="flex items-center gap-2">
               <button 
                 onClick={handleSelectProjectFolder}
+                disabled={isPickerLoading}
                 className={cn(
                   "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all border",
                   projectFolderHandle 
                     ? "bg-emerald-50 text-emerald-700 border-emerald-100" 
-                    : "bg-stone-100 text-stone-600 hover:bg-stone-200 border-stone-200"
+                    : "bg-stone-100 text-stone-600 hover:bg-stone-200 border-stone-200",
+                  isPickerLoading && "opacity-50 cursor-not-allowed"
                 )}
                 title="Selecionar pasta para guardar automaticamente o projeto em SQLite"
               >
-                <Save size={18} />
+                {isPickerLoading ? <Loader2 className="animate-spin" size={18} /> : <Save size={18} />}
                 <span>{projectFolderHandle ? "Projeto SQLite Ativo" : "Vincular Pasta Projeto (SQLite)"}</span>
               </button>
 
@@ -1042,14 +1174,30 @@ export default function App() {
           )}
 
           {projectFolderHandle && (
-            <button 
-              onClick={() => saveProjectToDisk(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-stone-800 text-white hover:bg-stone-900 rounded-xl transition-all text-sm font-medium shadow-sm"
-              title="Forçar gravação do estado atual no ficheiro projeto.sqlite"
-            >
-              <Save size={18} />
-              <span>Guardar Agora</span>
-            </button>
+            <div className="flex items-center gap-1">
+              <button 
+                onClick={() => saveProjectToDisk(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-stone-800 text-white hover:bg-stone-900 rounded-xl transition-all text-sm font-medium shadow-sm"
+                title="Forçar gravação do estado atual no ficheiro projeto.sqlite"
+              >
+                <Save size={18} />
+                <span>Guardar Agora</span>
+              </button>
+              <button 
+                onClick={handleCheckIntegrity}
+                className="p-2 text-stone-500 hover:bg-stone-100 rounded-xl transition-colors"
+                title="Verificar integridade da base de dados"
+              >
+                <Database size={18} />
+              </button>
+              <button 
+                onClick={handleDownloadDb}
+                className="p-2 text-stone-500 hover:bg-stone-100 rounded-xl transition-colors"
+                title="Descarregar ficheiro .sqlite para o computador"
+              >
+                <FolderUp size={18} />
+              </button>
+            </div>
           )}
 
           <button 
@@ -1091,7 +1239,7 @@ export default function App() {
           <label className="flex items-center gap-2 px-4 py-2 text-sm font-medium bg-stone-900 text-white hover:bg-stone-800 rounded-lg transition-colors cursor-pointer">
             <FileJson size={18} />
             Carregar Projeto
-            <input type="file" accept=".json" onChange={loadProject} className="hidden" />
+            <input type="file" accept=".json" multiple onChange={loadProject} className="hidden" />
           </label>
         </div>
       </header>
@@ -1143,22 +1291,56 @@ export default function App() {
           Consulta e Pesquisa
         </button>
         {backupCode === '05031970' && (
-          <button 
-            onClick={() => setActiveTab('timeline')}
-            className={cn(
-              "py-4 text-sm font-medium border-b-2 transition-colors flex items-center gap-2",
-              activeTab === 'timeline' ? "border-stone-900 text-stone-900" : "border-transparent text-stone-400 hover:text-stone-600"
-            )}
-          >
-            <LayoutList size={18} />
-            Timeline por Assuntos
-          </button>
+          <>
+            <button 
+              onClick={() => setActiveTab('timeline')}
+              className={cn(
+                "py-4 text-sm font-medium border-b-2 transition-colors flex items-center gap-2",
+                activeTab === 'timeline' ? "border-stone-900 text-stone-900" : "border-transparent text-stone-400 hover:text-stone-600"
+              )}
+            >
+              <LayoutList size={18} />
+              Timeline por Assuntos
+            </button>
+            <button 
+              onClick={() => setActiveTab('chatbot')}
+              className={cn(
+                "py-4 text-sm font-medium border-b-2 transition-colors flex items-center gap-2",
+                activeTab === 'chatbot' ? "border-stone-900 text-stone-900" : "border-transparent text-stone-400 hover:text-stone-600"
+              )}
+            >
+              <Bot size={18} />
+              Chatbot IA
+            </button>
+          </>
         )}
       </nav>
 
       <main className="flex-1 p-8 overflow-auto">
         <AnimatePresence mode="wait">
-          {(activeTab === 'inquerito' || activeTab === 'instrucao' || activeTab === 'julgamento') ? (
+          {activeTab === 'chatbot' ? (
+            <motion.div
+              key="chatbot"
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className="max-w-5xl mx-auto h-full"
+            >
+              <Chatbot 
+                documents={documents} 
+                onOpenDoc={(doc, page) => {
+                  setSelectedDoc(doc);
+                  setModalView('summary');
+                  if (page) {
+                    openFile(doc.fileName, page);
+                  }
+                }}
+                onOpenAudio={(doc, seconds) => {
+                  handleOpenAudio(doc, seconds);
+                }}
+              />
+            </motion.div>
+          ) : (activeTab === 'inquerito' || activeTab === 'instrucao' || activeTab === 'julgamento') ? (
             <motion.div 
               key={activeTab}
               initial={{ opacity: 0, y: 10 }}
@@ -1406,7 +1588,7 @@ export default function App() {
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
                     <label className="text-[10px] font-bold uppercase tracking-wider text-stone-400">Assuntos / Texto</label>
-                    <span className="text-[9px] text-stone-400 cursor-help" title="Use + para obrigatório, - para excluir, OR para alternativas">Booleano (?)</span>
+                    <span className="text-[9px] text-stone-400 cursor-help" title="Pesquisa no texto integral, nomes de ficheiros e tópicos IA. Use + para obrigatório, - para excluir, OR para alternativas">Booleano (?)</span>
                   </div>
                   <input 
                     type="text" 
@@ -1672,6 +1854,13 @@ export default function App() {
                           Ouvir e Transcrever
                         </button>
                       )}
+                      <button 
+                        onClick={() => exportTranscriptionToWord(selectedDoc)}
+                        className="text-xs text-stone-500 hover:text-stone-900 underline flex items-center gap-1"
+                      >
+                        <FileText size={12} />
+                        Exportar Word
+                      </button>
                       <button 
                         onClick={() => setModalView('text')}
                         className="text-xs text-stone-500 hover:text-stone-900 underline"
@@ -2065,6 +2254,7 @@ export default function App() {
                 setDocuments(prev => prev.map(d => d.id === updatedDoc.id ? updatedDoc : d));
                 setAudioModalDoc(updatedDoc);
               }}
+              isLowPowerMode={isLowPowerMode}
             />
           );
         })()

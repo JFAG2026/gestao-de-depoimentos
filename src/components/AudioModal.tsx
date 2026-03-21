@@ -1,7 +1,8 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Play, Pause, X, Search, ChevronLeft, ChevronRight, ExternalLink, Volume2, Mic, Clock, User } from 'lucide-react';
+import { Play, Pause, X, Search, ChevronLeft, ChevronRight, ExternalLink, Volume2, Mic, Clock, User, FileText } from 'lucide-react';
 import { AnalyzedDocument, AudioSegment } from '../types';
+import { exportTranscriptionToWord } from '../utils/wordReport';
 
 interface AudioModalProps {
   doc: AnalyzedDocument;
@@ -10,9 +11,10 @@ interface AudioModalProps {
   onClose: () => void;
   onOpenFile: (fileName: string) => void;
   onUpdateDoc: (doc: AnalyzedDocument) => void;
+  isLowPowerMode?: boolean;
 }
 
-const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, onClose, onOpenFile, onUpdateDoc }) => {
+const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, onClose, onOpenFile, onUpdateDoc, isLowPowerMode }) => {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -77,7 +79,7 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
       audioRef.current.load();
     }
     setAudioError(null);
-  }, [audioUrl]);
+  }, [audioUrl, retryCount]);
 
   // Scroll to the segment when initialSeek changes
   useEffect(() => {
@@ -234,6 +236,13 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
           
           <div className="flex items-center gap-3">
             <button 
+              onClick={() => exportTranscriptionToWord(doc)}
+              className="flex items-center gap-2 px-4 py-2 text-slate-300 hover:text-white hover:bg-slate-800 rounded-xl text-xs font-medium transition-all"
+            >
+              <FileText size={14} />
+              <span>Exportar Word</span>
+            </button>
+            <button 
               onClick={() => onOpenFile(doc.fileName)}
               className="flex items-center gap-2 px-4 py-2 text-slate-300 hover:text-white hover:bg-slate-800 rounded-xl text-xs font-medium transition-all"
             >
@@ -257,23 +266,28 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
               <div className="w-full aspect-video bg-slate-800/50 rounded-2xl border border-slate-700 flex items-center justify-center relative group overflow-hidden">
                 <div className="absolute inset-0 bg-gradient-to-br from-blue-600/10 to-transparent opacity-50" />
                 {audioError ? (
-                  <div className="flex flex-col items-center gap-4 p-6 text-center">
+                  <div className="flex flex-col items-center gap-4 p-6 text-center z-20">
                     <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center text-red-500">
                       <X size={32} />
                     </div>
                     <div className="space-y-1">
                       <p className="text-red-400 font-medium text-sm">Erro ao carregar áudio</p>
-                      <p className="text-slate-500 text-[10px] max-w-[200px]">{audioError}</p>
+                      <p className="text-slate-500 text-[10px] max-w-[220px] leading-relaxed">{audioError}</p>
                     </div>
-                    <button 
-                      onClick={() => {
-                        setAudioError(null);
-                        setRetryCount(prev => prev + 1);
-                      }}
-                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs rounded-lg transition-colors"
-                    >
-                      Tentar Novamente
-                    </button>
+                    <div className="flex flex-col gap-2 w-full">
+                      <button 
+                        onClick={() => {
+                          setAudioError(null);
+                          setRetryCount(prev => prev + 1);
+                        }}
+                        className="w-full px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-lg transition-colors shadow-lg shadow-blue-900/20"
+                      >
+                        Tentar Novamente
+                      </button>
+                      <p className="text-[9px] text-slate-500">
+                        Dica: Se o erro persistir, use o botão "Vincular Ficheiros" no menu principal para renovar o acesso aos ficheiros.
+                      </p>
+                    </div>
                   </div>
                 ) : (
                   <>
@@ -284,8 +298,8 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
                       {[...Array(20)].map((_, i) => (
                         <motion.div 
                           key={i}
-                          animate={isPlaying ? { height: [10, Math.random() * 40 + 10, 10] } : { height: 10 }}
-                          transition={{ repeat: Infinity, duration: 0.5 + Math.random() }}
+                          animate={isPlaying && !isLowPowerMode ? { height: [10, Math.random() * 40 + 10, 10] } : { height: 10 }}
+                          transition={isLowPowerMode ? { duration: 0 } : { repeat: Infinity, duration: 0.5 + Math.random() }}
                           className="w-1 bg-blue-500/40 rounded-full"
                         />
                       ))}
@@ -330,7 +344,8 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
                   </button>
                   <button 
                     onClick={togglePlay}
-                    className="w-16 h-16 bg-blue-600 text-white rounded-full flex items-center justify-center hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 active:scale-95"
+                    disabled={!!audioError}
+                    className="w-16 h-16 bg-blue-600 text-white rounded-full flex items-center justify-center hover:bg-blue-500 transition-all shadow-xl shadow-blue-900/20 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {isPlaying ? <Pause size={32} fill="currentColor" /> : <Play size={32} fill="currentColor" className="ml-1" />}
                   </button>
@@ -492,6 +507,7 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
           <audio 
             key={`${audioUrl}-${retryCount}`}
             ref={audioRef} 
+            src={audioUrl}
             preload="auto"
             onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
             onLoadedMetadata={handleLoadedMetadata}
@@ -502,17 +518,21 @@ const AudioModal: React.FC<AudioModalProps> = ({ doc, audioFile, initialSeek, on
               const error = e.currentTarget.error;
               console.error("Audio playback error:", error);
               let message = `O navegador não conseguiu carregar o ficheiro "${audioFile.name}".`;
-              if (error?.code === 1) message = "O carregamento do áudio foi interrompido (Code 1).";
-              if (error?.code === 2) message = "Erro de rede ao carregar o áudio (Code 2).";
-              if (error?.code === 3) message = "Erro ao descodificar o áudio. O formato pode não ser suportado (Code 3).";
-              if (error?.code === 4) message = `O ficheiro de áudio não foi encontrado ou o formato (${audioMimeType}) não é suportado (Code 4).`;
-              if (error) message += ` [Erro: ${error.code}]`;
+              
+              if (error) {
+                if (error.code === 1) message = "O carregamento do áudio foi interrompido (Code 1).";
+                else if (error.code === 2) message = "Erro de rede ao carregar o áudio (Code 2).";
+                else if (error.code === 3) message = "Erro ao descodificar o áudio. O formato pode não ser suportado (Code 3).";
+                else if (error.code === 4) message = `O ficheiro de áudio não foi encontrado ou o formato (${audioMimeType}) não é suportado (Code 4).`;
+                message += ` [Erro: ${error.code}]`;
+              } else {
+                message += " Verifique se o ficheiro ainda existe na pasta original.";
+              }
+              
               setAudioError(message);
             }}
             className="hidden"
-          >
-            <source src={audioUrl} type={audioMimeType} />
-          </audio>
+          />
         )}
       </motion.div>
     </div>
